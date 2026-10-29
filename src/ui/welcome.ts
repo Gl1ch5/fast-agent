@@ -1,5 +1,5 @@
 // First-run splash with an animated gradient logo, and the banner at the top of the transcript.
-import { accent, bold, gray, gradient, shimmer, center, boxed, border } from './ansi.ts';
+import { accent, bold, gray, gradient, shimmer, center } from './ansi.ts';
 import { M } from './modal.ts';
 import { log, req, ui } from './screen.ts';
 import { VERSION } from '../version.ts';
@@ -40,14 +40,9 @@ export function welcome(): Promise<boolean> {
   });
 }
 
+// one quiet line at the top of the transcript
 export function banner() {
-  const rows = [
-    `${accent('✻')} ${bold('Welcome to fa')} ${gray('v' + VERSION)}`,
-    '',
-    gray(`cwd  ${tildify(ROOT)}`),
-    gray('/ for commands · /setup to configure · /model to switch'),
-  ];
-  log.push({ s: 'banner', dyn: (W) => boxed(rows, W, '', border) });
+  log.push({ s: `${accent('✻')} ${bold('fa')} ${gray(`v${VERSION}  ·  ${tildify(ROOT)}`)}`, clip: true });
   log.push({ s: '' });
   req();
 }

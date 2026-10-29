@@ -11,7 +11,7 @@ import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 // ─── version.ts ────────────────────────────────────────────────────────────
-const VERSION = '0.2.5';
+const VERSION = '0.2.6';
 const REPO = 'gl1ch5/fast-agent';
 const BRANCH = 'main';
 
@@ -493,14 +493,9 @@ function welcome(): Promise<boolean> {
   });
 }
 
+// one quiet line at the top of the transcript
 function banner() {
-  const rows = [
-    `${accent('✻')} ${bold('Welcome to fa')} ${gray('v' + VERSION)}`,
-    '',
-    gray(`cwd  ${tildify(ROOT)}`),
-    gray('/ for commands · /setup to configure · /model to switch'),
-  ];
-  log.push({ s: 'banner', dyn: (W) => boxed(rows, W, '', border) });
+  log.push({ s: `${accent('✻')} ${bold('fa')} ${gray(`v${VERSION}  ·  ${tildify(ROOT)}`)}`, clip: true });
   log.push({ s: '' });
   req();
 }
@@ -1571,7 +1566,7 @@ function footer(W: number): string {
 let prev: string[] = [];
 let prevCur = '';
 let lastTotal = 0;
-const PAD = 2;   // same margin on the left and on the right
+const PAD = 1;   // same margin on the left and on the right
 
 function resetFrame() { prev = []; prevCur = ''; w('\x1b[2J'); }
 
@@ -1592,9 +1587,11 @@ function render() {
   } else {
     bottom.push(...statusRows(W));
     for (const q of queue) bottom.push(fit(gray(`  ⏎ ${q.replace(/\n/g, ' ')}`), W));
-    const iv = inputView(W - 4);
-    cur = [bottom.length + 1 + iv.cur[0], 2 + iv.cur[1]];
-    bottom.push(...boxed(iv.rows, W, '', agent.ctrl ? border : borderHi));
+    // input between two thin rules — no side walls
+    const iv = inputView(W);
+    const rule = (agent.ctrl ? border : borderHi)('─'.repeat(W));
+    cur = [bottom.length + 1 + iv.cur[0], iv.cur[1]];
+    bottom.push(rule, ...iv.rows, rule);
     const sug = suggestions();
     if (sug.length) bottom.push(...sugRows(sug, W));
   }

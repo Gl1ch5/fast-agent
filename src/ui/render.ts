@@ -95,7 +95,7 @@ function footer(W: number): string {
 let prev: string[] = [];
 let prevCur = '';
 let lastTotal = 0;
-const PAD = 2;   // same margin on the left and on the right
+const PAD = 1;   // same margin on the left and on the right
 
 export function resetFrame() { prev = []; prevCur = ''; w('\x1b[2J'); }
 
@@ -116,9 +116,11 @@ export function render() {
   } else {
     bottom.push(...statusRows(W));
     for (const q of queue) bottom.push(fit(gray(`  ⏎ ${q.replace(/\n/g, ' ')}`), W));
-    const iv = inputView(W - 4);
-    cur = [bottom.length + 1 + iv.cur[0], 2 + iv.cur[1]];
-    bottom.push(...boxed(iv.rows, W, '', agent.ctrl ? border : borderHi));
+    // input between two thin rules — no side walls
+    const iv = inputView(W);
+    const rule = (agent.ctrl ? border : borderHi)('─'.repeat(W));
+    cur = [bottom.length + 1 + iv.cur[0], iv.cur[1]];
+    bottom.push(rule, ...iv.rows, rule);
     const sug = suggestions();
     if (sug.length) bottom.push(...sugRows(sug, W));
   }
