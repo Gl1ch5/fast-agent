@@ -18,7 +18,7 @@ export async function runTurn(text: string) {
   conv.history.push({ role: 'user', text });
   undoStack.push(new Map());
   const ctrl = new AbortController(); const sig = ctrl.signal;
-  agent.ctrl = ctrl; agent.t0 = Date.now(); agent.chars = 0; agent.mode = '';
+  agent.ctrl = ctrl; agent.t0 = Date.now(); agent.chars = 0; agent.mode = ''; agent.net = '';
   const u0 = { ...usage };
   const verb = VERBS[Math.floor(Math.random() * VERBS.length)];
   let steps = 0, genMs = 0;   // genMs: time spent streaming output, for the average tok/s

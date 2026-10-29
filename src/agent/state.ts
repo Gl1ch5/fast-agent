@@ -15,6 +15,7 @@ export const usage = { in: 0, out: 0, cache: 0, last: 0 };   // last: input toke
 export const agent = {
   ctrl: null as AbortController | null,
   t0: 0, chars: 0,
+  net: '' as '' | 'wait' | 'open',   // request sent, no answer yet / stream open
   firstAt: 0,   // first streamed token of the current model call (for tok/s)
   mode: '' as 'text' | 'think' | '',
   thinking: false, thinkBuf: '', thinkAll: '', thinkT0: 0,

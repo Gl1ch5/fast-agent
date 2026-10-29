@@ -12,7 +12,7 @@ import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 // ─── version.ts ────────────────────────────────────────────────────────────
-const VERSION = '0.4.2';
+const VERSION = '0.4.3';
 const REPO = 'gl1ch5/fast-agent';
 const BRANCH = 'main';
 
@@ -542,6 +542,7 @@ const usage = { in: 0, out: 0, cache: 0, last: 0 };   // last: input tokens of t
 const agent = {
   ctrl: null as AbortController | null,
   t0: 0, chars: 0,
+  net: '' as '' | 'wait' | 'open',   // request sent, no answer yet / stream open
   firstAt: 0,   // first streamed token of the current model call (for tok/s)
   mode: '' as 'text' | 'think' | '',
   thinking: false, thinkBuf: '', thinkAll: '', thinkT0: 0,
@@ -1311,15 +1312,25 @@ Working directory: ${listing || '(empty)'}`;
 // ─── api/http.ts ───────────────────────────────────────────────────────────
 // HTTP plumbing shared by the API clients: SSE parsing, retries, auth headers.
 
+// FA_DEBUG=1: every request body (no keys), response status/headers and raw stream line, timed, in ~/.fa/debug.log
+const DEBUG = !!process.env.FA_DEBUG;
+let dbgT0 = 0;
+function dbg(s: string) {
+  if (!DEBUG) return;
+  dbgT0 ||= Date.now();
+  try { fs.appendFileSync(path.join(CFG_DIR, 'debug.log'), `${String(Date.now() - dbgT0).padStart(7)}ms ${s}\n`); } catch {}
+}
+
 async function* sse(res: Response): AsyncGenerator<any> {
   const reader = res.body!.getReader(); const dec = new TextDecoder(); let buf = '';
   for (;;) {
     const { done, value } = await reader.read();
-    if (done) break;
+    if (done) { dbg('stream end'); break; }
     buf += dec.decode(value, { stream: true });
     let i;
     while ((i = buf.indexOf('\n')) >= 0) {
       const l = buf.slice(0, i).replace(/\r$/, ''); buf = buf.slice(i + 1);
+      if (l) dbg('< ' + l);
       if (!l.startsWith('data:')) continue;
       const d = l.slice(5).trim();
       if (d === '[DONE]') return;
@@ -1335,6 +1346,8 @@ function errText(t: string) {
 async function post(url: string, headers: Record<string, string>, body: any, sig: AbortSignal): Promise<Response> {
   for (let a = 0; ; a++) {
     let res: Response;
+    dbg(`POST ${url} ${JSON.stringify({ ...body, messages: body.messages?.length, system: body.system ? '…' : undefined, tools: body.tools?.length })}`);
+    agent.net = 'wait';
     try {
       res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body), signal: sig });
     } catch (e: any) {
@@ -1342,8 +1355,10 @@ async function post(url: string, headers: Record<string, string>, body: any, sig
       if (a >= 3) throw new Error(`${e.message}${e.cause ? ': ' + (e.cause.code || e.cause.message) : ''} (${url})`);
       spin.start(`Network error, retry ${a + 1}/3`); await sleep(1000 * 2 ** a, sig); continue;
     }
-    if (res.ok) return res;
+    dbg(`${res.status} ${JSON.stringify(Object.fromEntries(res.headers))}`);
+    if (res.ok) { agent.net = 'open'; return res; }
     const t = await res.text();
+    dbg('< ' + t.slice(0, 2000));
     if ((res.status === 429 || res.status >= 500) && a < 3) {
       const ra = Number(res.headers.get('retry-after'));
       spin.start(`${res.status} ${clip(String(errText(t)), 60)} — retry ${a + 1}/3`);
@@ -2142,7 +2157,9 @@ function statusRows(W: number): string[] {
   if (busy) {
     const secs = Math.floor((Date.now() - agent.t0) / 1000);
     const tps = liveTps();
-    st += gray(` (${secs}s · ↓ ${kt(Math.round(agent.chars / 4))} tokens${tps >= 1 ? ` · ${Math.round(tps)} tok/s` : ''} · esc to interrupt)`);
+    // nothing streamed yet: say whether the server has answered at all
+    const net = agent.chars ? '' : agent.net === 'wait' ? ' · waiting for server' : agent.net === 'open' ? ' · connected, waiting for tokens' : '';
+    st += gray(` (${secs}s · ↓ ${kt(Math.round(agent.chars / 4))} tokens${tps >= 1 ? ` · ${Math.round(tps)} tok/s` : ''}${net} · esc to interrupt)`);
   }
   rows.push(fit(st, W));
   rows.push('');
@@ -2445,7 +2462,8 @@ async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
     tools: TOOLS.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.schema } })),
   };
   if (cfg.maxTokens) body.max_tokens = cfg.maxTokens;
-  const effort = cfg.effort === 'auto' ? '' : ['xhigh', 'max'].includes(cfg.effort) ? 'high' : cfg.effort;
+  // OpenAI takes low/medium/high; DeepSeek and OmniRoute also take max (a rejection falls back below)
+  const effort = cfg.effort === 'auto' ? '' : ['xhigh', 'max'].includes(cfg.effort) && !isOmni(p) && !/deepseek/i.test(p.url) ? 'high' : cfg.effort;
   // ask for the reasoning text where the provider hides it by default
   const extra: any = {};
   if (/generativelanguage\.googleapis/.test(p.url)) extra.extra_body = { google: { thinking_config: { include_thoughts: true } } };
@@ -2459,7 +2477,8 @@ async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
   }
   // a server that rejects the reasoning options gets the request with fewer of them, then none
   const { thinking, reasoning_effort, ...rest } = extra;
-  const tries = [extra, rest, {}].filter((x, i, a) => i === 0 || Object.keys(x).length < Object.keys(a[i - 1]).length);
+  const high = effort === 'max' || effort === 'xhigh' ? [{ ...extra, reasoning_effort: 'high' }] : [];
+  const tries = [extra, ...high, rest, {}].filter((x, i, a) => i === 0 || x === high[0] || Object.keys(x).length < Object.keys(a[i - 1]).length);
   const key = `${p.url} ${cfg.model}`;
   let res!: Response;
   for (let n = Math.min(accepted.get(key) ?? 0, tries.length - 1); ; n++) {
@@ -2478,7 +2497,7 @@ async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
     const choice = ch.choices?.[0];
     if (!choice) continue;
     const d = choice.delta || {};
-    let think = d.reasoning_content ?? d.reasoning;
+    let think = d.reasoning_content ?? d.reasoning ?? d.reasoning_text ?? d.thinking;
     if (typeof think !== 'string' && Array.isArray(d.reasoning_details)) think = d.reasoning_details.map((r: any) => r.text || r.summary || '').join('');
     if (typeof think === 'string' && think) onThink(think);
     if (typeof d.content === 'string' && d.content) acc.text += tags.feed(d.content);
@@ -2509,7 +2528,7 @@ async function runTurn(text: string) {
   conv.history.push({ role: 'user', text });
   undoStack.push(new Map());
   const ctrl = new AbortController(); const sig = ctrl.signal;
-  agent.ctrl = ctrl; agent.t0 = Date.now(); agent.chars = 0; agent.mode = '';
+  agent.ctrl = ctrl; agent.t0 = Date.now(); agent.chars = 0; agent.mode = ''; agent.net = '';
   const u0 = { ...usage };
   const verb = VERBS[Math.floor(Math.random() * VERBS.length)];
   let steps = 0, genMs = 0;   // genMs: time spent streaming output, for the average tok/s

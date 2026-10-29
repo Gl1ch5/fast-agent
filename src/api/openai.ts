@@ -28,7 +28,8 @@ export async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
     tools: TOOLS.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.schema } })),
   };
   if (cfg.maxTokens) body.max_tokens = cfg.maxTokens;
-  const effort = cfg.effort === 'auto' ? '' : ['xhigh', 'max'].includes(cfg.effort) ? 'high' : cfg.effort;
+  // OpenAI takes low/medium/high; DeepSeek and OmniRoute also take max (a rejection falls back below)
+  const effort = cfg.effort === 'auto' ? '' : ['xhigh', 'max'].includes(cfg.effort) && !isOmni(p) && !/deepseek/i.test(p.url) ? 'high' : cfg.effort;
   // ask for the reasoning text where the provider hides it by default
   const extra: any = {};
   if (/generativelanguage\.googleapis/.test(p.url)) extra.extra_body = { google: { thinking_config: { include_thoughts: true } } };
@@ -42,7 +43,8 @@ export async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
   }
   // a server that rejects the reasoning options gets the request with fewer of them, then none
   const { thinking, reasoning_effort, ...rest } = extra;
-  const tries = [extra, rest, {}].filter((x, i, a) => i === 0 || Object.keys(x).length < Object.keys(a[i - 1]).length);
+  const high = effort === 'max' || effort === 'xhigh' ? [{ ...extra, reasoning_effort: 'high' }] : [];
+  const tries = [extra, ...high, rest, {}].filter((x, i, a) => i === 0 || x === high[0] || Object.keys(x).length < Object.keys(a[i - 1]).length);
   const key = `${p.url} ${cfg.model}`;
   let res!: Response;
   for (let n = Math.min(accepted.get(key) ?? 0, tries.length - 1); ; n++) {
@@ -61,7 +63,7 @@ export async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
     const choice = ch.choices?.[0];
     if (!choice) continue;
     const d = choice.delta || {};
-    let think = d.reasoning_content ?? d.reasoning;
+    let think = d.reasoning_content ?? d.reasoning ?? d.reasoning_text ?? d.thinking;
     if (typeof think !== 'string' && Array.isArray(d.reasoning_details)) think = d.reasoning_details.map((r: any) => r.text || r.summary || '').join('');
     if (typeof think === 'string' && think) onThink(think);
     if (typeof d.content === 'string' && d.content) acc.text += tags.feed(d.content);

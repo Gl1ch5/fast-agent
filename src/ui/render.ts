@@ -76,7 +76,9 @@ function statusRows(W: number): string[] {
   if (busy) {
     const secs = Math.floor((Date.now() - agent.t0) / 1000);
     const tps = liveTps();
-    st += gray(` (${secs}s · ↓ ${kt(Math.round(agent.chars / 4))} tokens${tps >= 1 ? ` · ${Math.round(tps)} tok/s` : ''} · esc to interrupt)`);
+    // nothing streamed yet: say whether the server has answered at all
+    const net = agent.chars ? '' : agent.net === 'wait' ? ' · waiting for server' : agent.net === 'open' ? ' · connected, waiting for tokens' : '';
+    st += gray(` (${secs}s · ↓ ${kt(Math.round(agent.chars / 4))} tokens${tps >= 1 ? ` · ${Math.round(tps)} tok/s` : ''}${net} · esc to interrupt)`);
   }
   rows.push(fit(st, W));
   rows.push('');

@@ -1,18 +1,31 @@
 // HTTP plumbing shared by the API clients: SSE parsing, retries, auth headers.
 import { clip } from '../ui/ansi.ts';
+import fs from 'node:fs';
+import path from 'node:path';
 import { spin } from '../ui/screen.ts';
 import { sleep } from '../util.ts';
-import { keyOf, type Prov } from '../config.ts';
+import { agent } from '../agent/state.ts';
+import { keyOf, CFG_DIR, type Prov } from '../config.ts';
+
+// FA_DEBUG=1: every request body (no keys), response status/headers and raw stream line, timed, in ~/.fa/debug.log
+const DEBUG = !!process.env.FA_DEBUG;
+let dbgT0 = 0;
+export function dbg(s: string) {
+  if (!DEBUG) return;
+  dbgT0 ||= Date.now();
+  try { fs.appendFileSync(path.join(CFG_DIR, 'debug.log'), `${String(Date.now() - dbgT0).padStart(7)}ms ${s}\n`); } catch {}
+}
 
 export async function* sse(res: Response): AsyncGenerator<any> {
   const reader = res.body!.getReader(); const dec = new TextDecoder(); let buf = '';
   for (;;) {
     const { done, value } = await reader.read();
-    if (done) break;
+    if (done) { dbg('stream end'); break; }
     buf += dec.decode(value, { stream: true });
     let i;
     while ((i = buf.indexOf('\n')) >= 0) {
       const l = buf.slice(0, i).replace(/\r$/, ''); buf = buf.slice(i + 1);
+      if (l) dbg('< ' + l);
       if (!l.startsWith('data:')) continue;
       const d = l.slice(5).trim();
       if (d === '[DONE]') return;
@@ -28,6 +41,8 @@ export function errText(t: string) {
 export async function post(url: string, headers: Record<string, string>, body: any, sig: AbortSignal): Promise<Response> {
   for (let a = 0; ; a++) {
     let res: Response;
+    dbg(`POST ${url} ${JSON.stringify({ ...body, messages: body.messages?.length, system: body.system ? '…' : undefined, tools: body.tools?.length })}`);
+    agent.net = 'wait';
     try {
       res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body), signal: sig });
     } catch (e: any) {
@@ -35,8 +50,10 @@ export async function post(url: string, headers: Record<string, string>, body: a
       if (a >= 3) throw new Error(`${e.message}${e.cause ? ': ' + (e.cause.code || e.cause.message) : ''} (${url})`);
       spin.start(`Network error, retry ${a + 1}/3`); await sleep(1000 * 2 ** a, sig); continue;
     }
-    if (res.ok) return res;
+    dbg(`${res.status} ${JSON.stringify(Object.fromEntries(res.headers))}`);
+    if (res.ok) { agent.net = 'open'; return res; }
     const t = await res.text();
+    dbg('< ' + t.slice(0, 2000));
     if ((res.status === 429 || res.status >= 500) && a < 3) {
       const ra = Number(res.headers.get('retry-after'));
       spin.start(`${res.status} ${clip(String(errText(t)), 60)} — retry ${a + 1}/3`);
