@@ -1,0 +1,13 @@
+{
+  "name": "fast-agent",
+  "private": true,
+  "type": "module",
+  "description": "fa — fast one-file coding agent. Sources live in src/, `node build.ts` bundles them into fa.ts.",
+  "scripts": {
+    "build": "node build.ts",
+    "check": "node build.ts --check",
+    "dev": "node src/main.ts",
+    "test": "node tests/smoke.ts"
+  },
+  "engines": { "node": ">=22.18" }
+}

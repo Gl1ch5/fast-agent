@@ -1,0 +1,16 @@
+name: check
+on: [push, pull_request]
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: fa.ts is built from src/
+        run: node build.ts --check
+      - name: fa.ts starts
+        run: echo "" | node fa.ts -p || test $? -eq 1
+      - name: smoke test
+        run: node tests/smoke.ts

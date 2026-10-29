@@ -1,0 +1,70 @@
+// Self-update: download the latest fa.ts from GitHub and replace this file.
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { VERSION, REPO, BRANCH } from './version.ts';
+import { ROOT } from './env.ts';
+import { cfg, saveCfg } from './config.ts';
+import { bold, gray, green, red, yellow } from './ui/ansi.ts';
+import { line, spin } from './ui/screen.ts';
+import { leaveTui } from './ui/tui.ts';
+import { cmpVer } from './util.ts';
+
+const selfPath = () => fileURLToPath(import.meta.url);
+
+// raw.githubusercontent.com caches a branch URL for minutes per edge, so resolve the
+// branch to its current commit (git's ref list is never cached) and download that
+async function latestCommit(timeout: number): Promise<string> {
+  try {
+    const res = await fetch(`https://github.com/${REPO}.git/info/refs?service=git-upload-pack`, { signal: AbortSignal.timeout(timeout) });
+    return new RegExp(`([0-9a-f]{40}) refs/heads/${BRANCH}\\b`).exec(await res.text())?.[1] || BRANCH;
+  } catch { return BRANCH; }
+}
+
+async function fetchLatest(timeout: number) {
+  const ref = await latestCommit(timeout);
+  const res = await fetch(`https://raw.githubusercontent.com/${REPO}/${ref}/fa.ts`, { signal: AbortSignal.timeout(timeout), headers: { 'cache-control': 'no-cache' } });
+  if (!res.ok) throw new Error(`download failed: ${res.status}`);
+  const src = await res.text();
+  const v = /const VERSION = '([^']+)'/.exec(src)?.[1];
+  if (!v || !src.startsWith('#!')) throw new Error('the downloaded file does not look like fa');
+  return { v, src };
+}
+
+// quiet check, at most twice a day; the footer shows when a newer version exists
+export function checkUpdates() {
+  if (Date.now() - (cfg.lastCheck || 0) < 12 * 3600_000) return;
+  fetchLatest(5000).then(({ v }) => { cfg.latest = v; cfg.lastCheck = Date.now(); saveCfg(); }).catch(() => {});
+}
+
+// true when the file was replaced
+export async function update(): Promise<boolean> {
+  const self = selfPath();
+  if (path.basename(self) !== 'fa.ts') { line(yellow('running from src/ — update with git pull && node build.ts'), { ind: 2 }); return false; }
+  if (fs.existsSync(path.join(path.dirname(self), '.git'))) { line(yellow('running from a git checkout — update with git pull'), { ind: 2 }); return false; }
+  spin.start('Checking for updates');
+  try {
+    const { v, src } = await fetchLatest(20000);
+    spin.stop();
+    cfg.latest = v; cfg.lastCheck = Date.now(); saveCfg();
+    // compare the file itself, not only the number: a new build may keep the version
+    const same = fs.readFileSync(self, 'utf8') === src;
+    if (same || cmpVer(v, VERSION) < 0) { line(`fa ${VERSION} is the latest version`, { mark: green('✓ '), ind: 2 }); return false; }
+    fs.writeFileSync(self + '.new', src);
+    fs.renameSync(self + '.new', self);
+    line(v === VERSION ? `updated fa ${VERSION} ${gray('(new build)')}` : `updated fa ${VERSION} → ${bold(v)}`, { mark: green('✓ '), ind: 2 });
+    return true;
+  } catch (e: any) {
+    spin.stop();
+    line(red(`update failed: ${e.message}`), { mark: red('✗ '), ind: 2 });
+    return false;
+  }
+}
+
+// start the new version in place of this process
+export function restart(): never {
+  leaveTui(false);
+  const r = spawnSync(process.execPath, [selfPath(), '-C', ROOT], { stdio: 'inherit' });
+  process.exit(r.status ?? 0);
+}
