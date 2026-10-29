@@ -2,7 +2,7 @@
 // fa — fast agent. Entry point: print mode (-p / pipes) or the full-screen TUI.
 import { opt, rest } from './env.ts';
 import { cfg } from './config.ts';
-import { accent, gray } from './ui/ansi.ts';
+import { accent, bold, gray, green, yellow } from './ui/ansi.ts';
 import { line, gap } from './ui/screen.ts';
 import { editor, queue, hist } from './ui/input.ts';
 import { startTui, leaveTui } from './ui/tui.ts';
@@ -11,8 +11,9 @@ import { conv, agent } from './agent/state.ts';
 import { runTurn } from './agent/loop.ts';
 import { systemPrompt } from './prompt.ts';
 import { command } from './commands.ts';
-import { setup } from './setup.ts';
+import { setup, signIn } from './setup.ts';
 import { update, checkUpdates } from './update.ts';
+import { pull, flushSync } from './sync.ts';
 
 conv.system = systemPrompt();
 
@@ -35,7 +36,13 @@ if (opt.print || !process.stdin.isTTY || !process.stdout.isTTY) {
 startTui();
 banner();
 checkUpdates();
-if (!cfg.setupDone) { if (await welcome()) await setup(true); else line(gray('setup skipped — run /setup any time'), { ind: 2 }); }
+if (cfg.sync) pull().then((got) => { if (got) line(gray(`settings synced from ${cfg.sync!.user}`), { mark: green('↓ '), ind: 2 }); }, (e) => line(yellow(`sync: ${e.message}`), { ind: 2 }));
+if (!cfg.setupDone) {
+  const w = await welcome();
+  if (w === 'login' && (await signIn(0)) && cfg.setupDone) line(`${bold('Ready')}  ${gray('/model to switch')}`, { mark: green('✓ '), ind: 2 });
+  else if (w) await setup(true);
+  else line(gray('setup skipped — run /setup any time'), { ind: 2 });
+}
 
 if (firstPrompt) queue.push(firstPrompt);
 for (;;) {
@@ -49,4 +56,5 @@ for (;;) {
   await runTurn(input);
 }
 leaveTui();
+await flushSync();
 process.exit(0);

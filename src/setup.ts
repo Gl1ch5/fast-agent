@@ -4,6 +4,7 @@ import { accent, bold, gray, green, red, yellow, clip } from './ui/ansi.ts';
 import { line, gap } from './ui/screen.ts';
 import { pick, ask, loading, type Item } from './ui/modal.ts';
 import { listModels } from './api/models.ts';
+import { login } from './sync.ts';
 
 const STEPS = ['Provider', 'Models', 'Effort'];
 const stepLine = (i: number) => (i < 0 ? '' : STEPS.map((s, j) => (j < i ? green('● ') + gray(s) : j === i ? accent('● ') + bold(s) : gray('○ ' + s))).join(gray('  ─  ')));
@@ -77,8 +78,10 @@ export async function chooseModelsFor(name: string, step = -1): Promise<boolean>
   } else {
     const pre = cfg.models.filter((m) => m.startsWith(name + '/')).map((m) => m.slice(name.length + 1));
     if (!pre.length && DEFAULT_MODEL[name] && ids.includes(DEFAULT_MODEL[name])) pre.push(DEFAULT_MODEL[name]);
+    // models already in /model come first, so adding one more is a single tick
+    const sorted = [...ids.filter((id) => pre.includes(id)), ...ids.filter((id) => !pre.includes(id))];
     chosen = await pick({ title: `Models · ${name}`, step: st, full, multi: true, selected: pre, initial: pre[0],
-      desc: `${ids.length} models available. Tick only the ones you want in /model.` }, ids);
+      desc: `${ids.length} models available. Tick the ones you want in /model, untick to remove.` }, sorted);
   }
   if (!chosen || !chosen.length) return false;
   const labels = chosen.map((id) => `${name}/${id}`);
@@ -137,4 +140,27 @@ export async function chooseKey() {
   if (!k) return;
   cfg.providers[n] = { ...cfg.providers[n], key: k }; saved();
   line(`key saved for ${n}`, { mark: green('✓ '), ind: 2 });
+}
+
+// sign in (or create an account) and sync settings; true when signed in
+export async function signIn(step = -1, arg = ''): Promise<boolean> {
+  const full = step >= 0;
+  const desc = 'Your providers, API keys, models and preferences are kept on the sync server\nand appear on every machine where you sign in.';
+  const user = arg || (await ask({ title: 'Account · login', full, desc, initial: cfg.sync?.user || '' }));
+  if (!user) return false;
+  const pass = await ask({ title: 'Account · password', full, mask: true, desc: `Password for ${bold(user)}` });
+  if (!pass) return false;
+  let how: 'pulled' | 'pushed';
+  try { how = await loading('Account', 'Signing in…', login(user, pass, false)); }
+  catch (e: any) {
+    if (e.status !== 404) { line(red(`sign-in failed: ${e.message}`), { mark: red('✗ '), ind: 2 }); return false; }
+    const again = await ask({ title: 'New account', full, mask: true, desc: `There is no account ${bold(user)} yet.\nType the password again to create it.` });
+    if (!again) return false;
+    if (again !== pass) { line(red('passwords do not match'), { mark: red('✗ '), ind: 2 }); return false; }
+    try { how = await loading('Account', 'Creating account…', login(user, pass, true)); }
+    catch (e2: any) { line(red(`could not create the account: ${e2.message}`), { mark: red('✗ '), ind: 2 }); return false; }
+  }
+  line(`signed in as ${bold(user)} · ${how === 'pulled' ? 'settings loaded from your account' : 'settings uploaded to your account'}`, { mark: green('✓ '), ind: 2 });
+  if (cfg.setupDone) line(gray(`${modelLabel()} · models: ${cfg.models.join(', ') || 'none'}`), { ind: 2, clip: true });
+  return true;
 }

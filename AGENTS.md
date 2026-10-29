@@ -27,12 +27,14 @@ src/main.ts        entry: print mode (-p, pipes) or the full-screen TUI
 src/env.ts         CLI args, ROOT          src/config.ts   ~/.fa/config.json, provider presets
 src/prompt.ts      system prompt           src/setup.ts    setup wizard, model selection
 src/commands.ts    slash commands          src/update.ts   self-update
+src/sync.ts        account login, settings sync with the fa-sync server
 src/agent/         agent loop, streaming, shared turn state
 src/api/           Anthropic, OpenAI-compatible, /models, HTTP + SSE
 src/tools/         write, edit, read, shell, sandbox + undo
 src/shell/         shell command → short label, progress parsing
 src/ui/            screen/log, render, input, modals, tool cards, welcome, colors
 build.ts           bundler: src/ → fa.ts
+server/fa-sync.ts  sync server (runs on grzxk.ru as fa-sync.service behind nginx /fa-sync/); not bundled
 ```
 
 ## Checking changes

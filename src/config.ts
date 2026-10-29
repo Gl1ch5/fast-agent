@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { opt } from './env.ts';
+import { schedulePush } from './sync.ts';
 
 export type PType = 'openai' | 'anthropic';
 export interface Prov { type: PType; url: string; key?: string; env?: string; headers?: Record<string, string> }
@@ -12,6 +13,7 @@ export interface Cfg {
   models: string[];        // "provider/model" labels picked during setup — what /model offers
   setupDone: boolean;
   latest?: string; lastCheck?: number;
+  sync?: { user: string; token: string; at: number; hash: string; url?: string };   // account sync (see sync.ts)
 }
 
 export const PRESETS: Record<string, Prov> = {
@@ -49,6 +51,7 @@ export function saveCfg(): string | null {
   try {
     fs.mkdirSync(CFG_DIR, { recursive: true });
     fs.writeFileSync(CFG_FILE, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+    schedulePush();
     return null;
   } catch (e: any) { return `can't save config: ${e.message}`; }
 }

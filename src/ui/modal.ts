@@ -67,7 +67,7 @@ export function pick(o: PickOpts, raw: (Item | string)[]): Promise<any> {
         rows.push('');
         const info: string[] = [];
         if (list.length > h || list.length < items.length) info.push(`${list.length}/${items.length}`);
-        if (o.multi) info.push(`${chosen.size} selected`, 'space toggle');
+        if (o.multi) info.push(`${chosen.size} selected`, 'space tick', 'ctrl+a all');
         info.push('↑↓ move', `enter ${o.multi ? 'confirm' : 'select'}`, 'esc back');
         rows.push(gray(info.join(' · ')));
         return { rows };

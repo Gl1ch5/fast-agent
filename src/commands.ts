@@ -8,7 +8,8 @@ import { banner } from './ui/welcome.ts';
 import { conv, usage } from './agent/state.ts';
 import { systemPrompt } from './prompt.ts';
 import { undoStack, relp } from './tools/sandbox.ts';
-import { saved, setup, chooseModel, manageModels, chooseModelsFor, chooseKey } from './setup.ts';
+import { saved, setup, chooseModel, manageModels, chooseModelsFor, chooseKey, signIn } from './setup.ts';
+import { logout, pull, push } from './sync.ts';
 import { update, restart } from './update.ts';
 
 export const COMMANDS: [string, string][] = [
@@ -19,6 +20,9 @@ export const COMMANDS: [string, string][] = [
   ['/fast', 'toggle Anthropic fast mode'],
   ['/provider', 'list providers · add <name> <url> [key] [openai|anthropic] · rm <name>'],
   ['/key', 'set an API key'],
+  ['/login', 'sign in to sync providers, keys and models across machines'],
+  ['/sync', 'sync settings with your account now'],
+  ['/logout', 'sign out of your account'],
   ['/safe', 'ask before every shell command'],
   ['/undo', 'revert file changes from the last request'],
   ['/clear', 'start a new conversation'],
@@ -98,6 +102,19 @@ export async function command(input: string): Promise<boolean> {
         }
         line(gray('/setup or /models to pick models · /provider add <name> <url> [key] [openai|anthropic]'), { ind: 2 });
       }
+      break;
+    }
+    case '/login': case '/account': await signIn(-1, args[0]); break;
+    case '/logout':
+      if (!cfg.sync) { line(gray('not signed in'), { ind: 2 }); break; }
+      await logout(); ok('signed out · settings stay on this machine');
+      break;
+    case '/sync': {
+      if (!cfg.sync) { line(gray('not signed in — /login'), { ind: 2 }); break; }
+      try {
+        const got = await pull(); await push(true);
+        ok(`${cfg.sync.user} · ${got ? 'downloaded newer settings' : 'settings are up to date'}`);
+      } catch (e: any) { line(red(`sync failed: ${e.message}`), { mark: red('✗ '), ind: 2 }); }
       break;
     }
     case '/update': case '/upgrade':
