@@ -9,7 +9,7 @@ the sources live in small modules under `src/`.
 - The installers and `/update` download `fa.ts` from `main`, so a push to `main` is a release.
 - Before every push: `node build.ts` (rebuilds `fa.ts`) and commit `fa.ts` together with the `src/` changes.
   `node build.ts --check` must pass — CI runs it.
-- Bump `VERSION` in `src/version.ts` when users should get an update (`/update` compares versions).
+- Bump `VERSION` in `src/version.ts` (patch: 0.2.1 → 0.2.2) with every push that changes `src/` — the footer's update notice and the installer summary rely on it.
 
 ## Code
 

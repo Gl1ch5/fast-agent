@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { VERSION, REPO_RAW } from './version.ts';
 import { ROOT } from './env.ts';
 import { cfg, saveCfg } from './config.ts';
-import { bold, green, red, yellow } from './ui/ansi.ts';
+import { bold, gray, green, red, yellow } from './ui/ansi.ts';
 import { line, spin } from './ui/screen.ts';
 import { leaveTui } from './ui/tui.ts';
 import { cmpVer } from './util.ts';
@@ -38,10 +38,12 @@ export async function update(): Promise<boolean> {
     const { v, src } = await fetchLatest(20000);
     spin.stop();
     cfg.latest = v; cfg.lastCheck = Date.now(); saveCfg();
-    if (cmpVer(v, VERSION) <= 0) { line(`fa ${VERSION} is the latest version`, { mark: green('✓ '), ind: 2 }); return false; }
+    // compare the file itself, not only the number: a new build may keep the version
+    const same = fs.readFileSync(self, 'utf8') === src;
+    if (same || cmpVer(v, VERSION) < 0) { line(`fa ${VERSION} is the latest version`, { mark: green('✓ '), ind: 2 }); return false; }
     fs.writeFileSync(self + '.new', src);
     fs.renameSync(self + '.new', self);
-    line(`updated fa ${VERSION} → ${bold(v)}`, { mark: green('✓ '), ind: 2 });
+    line(v === VERSION ? `updated fa ${VERSION} ${gray('(new build)')}` : `updated fa ${VERSION} → ${bold(v)}`, { mark: green('✓ '), ind: 2 });
     return true;
   } catch (e: any) {
     spin.stop();
