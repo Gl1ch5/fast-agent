@@ -40,23 +40,23 @@
 
 ## Установка
 
-Нужен **Node.js 22.18+** (запускает `.ts` напрямую, без сборки).
+Нужен **Node.js 22.18+**: он запускает `.ts` напрямую, без сборки.
 
-**Windows (PowerShell)** — ставит команду `fa` в PATH:
+Одна команда: скачает `fa`, добавит его в PATH и при необходимости поставит Node.js (через winget на Windows или Homebrew на macOS).
+
+**Windows (PowerShell):**
 
 ```powershell
-$d="$env:USERPROFILE\.fa\bin"; New-Item -ItemType Directory -Force $d | Out-Null; Invoke-WebRequest https://raw.githubusercontent.com/gl1ch5/fast-agent/main/fa.ts -OutFile "$d\fa.ts"; Set-Content "$d\fa.cmd" '@node "%~dp0fa.ts" %*'; [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ";$d", 'User'); $env:Path += ";$d"
+irm https://raw.githubusercontent.com/gl1ch5/fast-agent/HEAD/install.ps1 | iex
 ```
 
-**Linux / macOS**:
+**Linux / macOS:**
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/gl1ch5/fast-agent/main/fa.ts -o ~/.local/bin/fa.ts && printf '#!/bin/sh\nexec node "$HOME/.local/bin/fa.ts" "$@"\n' > ~/.local/bin/fa && chmod +x ~/.local/bin/fa
+curl -fsSL https://raw.githubusercontent.com/gl1ch5/fast-agent/HEAD/install.sh | sh
 ```
 
-(Проверь, что `~/.local/bin` есть в `PATH`.)
-
-Без установки: `node fa.ts`. Обновление — та же команда ещё раз.
+Без установки: `node fa.ts`. Обновление: запусти ту же команду ещё раз.
 
 ## Быстрый старт
 
