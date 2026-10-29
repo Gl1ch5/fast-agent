@@ -75,13 +75,13 @@
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/gl1ch5/fast-agent/HEAD/install.ps1 | iex
+irm https://raw.githubusercontent.com/gl1ch5/fast-agent/main/install.ps1 | iex
 ```
 
 **Linux / macOS:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gl1ch5/fast-agent/HEAD/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/gl1ch5/fast-agent/main/install.sh | sh
 ```
 
 Без установки: `node fa.ts`. Обновление: запусти ту же команду ещё раз.

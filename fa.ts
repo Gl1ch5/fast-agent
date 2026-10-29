@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 // ─── version.ts ────────────────────────────────────────────────────────────
 const VERSION = '0.2.0';
-const REPO_RAW = 'https://raw.githubusercontent.com/gl1ch5/fast-agent/HEAD';
+const REPO_RAW = 'https://raw.githubusercontent.com/gl1ch5/fast-agent/main';
 
 // ─── env.ts ────────────────────────────────────────────────────────────────
 // Process environment: platform flags, CLI arguments, working directory.

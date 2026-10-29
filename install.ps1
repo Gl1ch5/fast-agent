@@ -1,7 +1,7 @@
 # fa installer for Windows:
-#   irm https://raw.githubusercontent.com/gl1ch5/fast-agent/HEAD/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/gl1ch5/fast-agent/main/install.ps1 | iex
 # another branch / tag: $env:FA_REF='branch-name'; irm .../<branch-name>/install.ps1 | iex
-$ref = if ($env:FA_REF) { $env:FA_REF } else { 'HEAD' }
+$ref = if ($env:FA_REF) { $env:FA_REF } else { 'main' }
 $repo = "https://raw.githubusercontent.com/gl1ch5/fast-agent/$ref"
 $dir = if ($env:FA_BIN) { $env:FA_BIN } else { Join-Path $env:USERPROFILE '.fa\bin' }
 

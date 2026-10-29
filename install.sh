@@ -1,10 +1,10 @@
 #!/bin/sh
 # fa installer for Linux / macOS:
-#   curl -fsSL https://raw.githubusercontent.com/gl1ch5/fast-agent/HEAD/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/gl1ch5/fast-agent/main/install.sh | sh
 #   another branch / tag: curl -fsSL .../<branch>/install.sh | FA_REF=<branch> sh
 set -e
 
-REF="${FA_REF:-HEAD}"
+REF="${FA_REF:-main}"
 REPO="https://raw.githubusercontent.com/gl1ch5/fast-agent/$REF"
 DIR="${FA_BIN:-$HOME/.fa/bin}"
 
