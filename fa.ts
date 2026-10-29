@@ -11,7 +11,7 @@ import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 // ─── version.ts ────────────────────────────────────────────────────────────
-const VERSION = '0.2.3';
+const VERSION = '0.2.4';
 const REPO = 'gl1ch5/fast-agent';
 const BRANCH = 'main';
 
@@ -431,6 +431,7 @@ const agent = {
   t0: 0, chars: 0,
   mode: '' as 'text' | 'think' | '',
   thinking: false, thinkBuf: '', thinkT0: 0,
+  draft: null as { name: string; raw: string } | null,   // tool call still being streamed
 };
 
 // ─── util.ts ───────────────────────────────────────────────────────────────
@@ -1244,283 +1245,6 @@ function onKey(s: string | undefined, k: Key) {
   editor.key(s, k);
 }
 
-// ─── ui/render.ts ──────────────────────────────────────────────────────────
-// Full-screen frame: transcript, live status/cards, input box (or a modal),
-// command suggestions and the footer. Only changed rows are rewritten.
-
-// light inline markdown for assistant text
-function mdLine(s: string, fence: boolean): string {
-  if (/^\s*```/.test(s)) return gray(s);
-  if (fence) return code(s);
-  const h = /^(#{1,6})\s+(.*)$/.exec(s);
-  if (h) return bold(accent(h[2]));
-  if (/^\s*([-*_]\s*){3,}$/.test(s)) return gray('─'.repeat(24));
-  return s
-    .replace(/^(\s*)[-*+] /, (_, sp) => sp + accent('•') + ' ')
-    .replace(/^(\s*)> ?/, (_, sp) => sp + gray('│ '))
-    .replace(/`([^`]+)`/g, (_, x) => code(x))
-    .replace(/\*\*([^*]+)\*\*/g, (_, x) => bold(x));
-}
-
-function wrapLog(W: number): string[] {
-  const all: string[] = [];
-  let fence = false;
-  for (const r of log) {
-    const inFence = !!r.md && fence;
-    if (r.dyn) { if (!r.wr || r.ww !== W) { r.wr = r.dyn(W); r.ww = W; } for (const l of r.wr) all.push(l); continue; }
-    if (!r.wr || r.ww !== W || r.wf !== inFence) {
-      const ind = r.ind || 0;
-      const body = r.md ? mdLine(r.s, inFence) : r.s;
-      const lines = r.clip ? [fit(body, W - ind)] : wrapAnsi(body, W - ind);
-      r.wr = lines.map((l, i) => (i === 0 ? (r.mark ?? ' '.repeat(ind)) : ' '.repeat(ind)) + l);
-      r.ww = W; r.wf = inFence;
-    }
-    if (r.md && /^\s*```/.test(r.s)) fence = !fence;
-    for (const l of r.wr) all.push(l);
-  }
-  return all;
-}
-
-const STAR = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
-
-// running tool cards, shown right after the transcript
-function cardBlock(W: number): string[] {
-  if (!cards.length) return [];
-  const rows = log.length && log[log.length - 1].s !== '' && log[log.length - 1].kind !== 'tool' ? [''] : [];
-  for (const c of cards) rows.push(...cardRows(c, W));
-  return rows;
-}
-
-// status above the input: always two rows while working, so nothing above jumps
-function statusRows(W: number): string[] {
-  const busy = !!agent.ctrl;
-  if (!busy && !spin.on) return [''];
-  const rows: string[] = [];
-  let st = `${accent(STAR[ui.tick % STAR.length])} ${shimmer((spin.text || 'Working') + '…', ui.tick)}`;
-  if (busy) {
-    const secs = Math.floor((Date.now() - agent.t0) / 1000);
-    st += gray(` (${secs}s · ↓ ${kt(Math.round(agent.chars / 4))} tokens · esc to interrupt)`);
-  }
-  rows.push(fit(st, W));
-  const last = agent.thinking ? agent.thinkBuf.trim().split('\n').pop() || '' : '';
-  rows.push(last ? fit(gray(italic('  ' + last)), W) : '');
-  return rows;
-}
-
-function sugRows(sug: [string, string][], W: number): string[] {
-  const n = 8, sel = Math.min(editor.sel, sug.length - 1);
-  const start = Math.max(0, Math.min(sel - n + 1, sug.length - n));
-  return sug.slice(start, start + n).map(([c, d], i) => {
-    const on = start + i === sel;
-    return fit(`  ${on ? accent('❯') : ' '} ${pad(on ? accent(bold(c)) : c, 12)} ${on ? d : gray(d)}`, W);
-  });
-}
-
-function footer(W: number): string {
-  let left: string;
-  if (ui.note && Date.now() < ui.noteUntil) left = yellow(ui.note);
-  else if (ui.scroll > 0) left = accent(`↑ ${ui.scroll} lines up · PgDn to return`);
-  else if (agent.ctrl) left = gray('esc interrupt · enter queues a message');
-  else left = gray('/ commands · ↑↓ history · wheel/PgUp scroll');
-  const upd = cfg.latest && cmpVer(cfg.latest, VERSION) > 0 ? yellow(`↑ ${cfg.latest} · /update`) + gray(' · ') : '';
-  const right = upd + gray(`${modelLabel()} · ${cfg.effort}${cfg.fast ? ' · fast' : ''}${cfg.safe ? ' · safe' : ''}`);
-  const sp = W - vw(left) - vw(right);
-  return sp >= 2 ? left + ' '.repeat(sp) + right : fit(left, W);
-}
-
-let prev: string[] = [];
-let prevCur = '';
-let lastTotal = 0;
-const PAD = 2;   // same margin on the left and on the right
-
-function resetFrame() { prev = []; prevCur = ''; w('\x1b[2J'); }
-
-function render() {
-  if (!ui.tui) return;
-  const H = Math.max(8, process.stdout.rows || 24);
-  const W = Math.max(24, (process.stdout.columns || 80) - PAD * 2);
-  const bottom: string[] = [];
-  let cur: [number, number] | null = null;
-  const m = M.modal;
-  if (m) {
-    const maxBody = H - 3 - (m.full ? 0 : 4);
-    const r = m.render(W - 4, maxBody);
-    const body = r.rows.slice(0, maxBody);
-    if (m.full) while (body.length < maxBody) body.push('');
-    bottom.push(...boxed(body, W, m.title, borderHi));
-    if (r.cur) cur = [r.cur[0] + 1, r.cur[1] + 2];
-  } else {
-    bottom.push(...statusRows(W));
-    for (const q of queue) bottom.push(fit(gray(`  ⏎ ${q.replace(/\n/g, ' ')}`), W));
-    const iv = inputView(W - 4);
-    cur = [bottom.length + 1 + iv.cur[0], 2 + iv.cur[1]];
-    bottom.push(...boxed(iv.rows, W, '', agent.ctrl ? border : borderHi));
-    const sug = suggestions();
-    if (sug.length) bottom.push(...sugRows(sug, W));
-  }
-  const vh = Math.max(0, H - 1 - bottom.length);
-  const all = m?.full ? [] : [...wrapLog(W), ...cardBlock(W)];
-  if (ui.scroll > 0 && all.length > lastTotal) ui.scroll += all.length - lastTotal;
-  lastTotal = all.length;
-  ui.scroll = Math.max(0, Math.min(ui.scroll, all.length - vh));
-  const end = all.length - ui.scroll;
-  const view = all.slice(Math.max(0, end - vh), end);
-  // transcript on top, input area pinned to the bottom
-  const frame = [...view];
-  while (frame.length < H - 1 - bottom.length) frame.push('');
-  const top = frame.length;
-  frame.push(...bottom, footer(W));
-  // only rewrite rows that changed; an unchanged frame writes nothing (no cursor flicker)
-  let rows = '';
-  frame.slice(0, H).forEach((r, i) => { if (prev[i] !== r) rows += `\x1b[${i + 1};1H\x1b[2K${' '.repeat(PAD)}${r}\x1b[0m`; });
-  const curPos = cur ? `\x1b[${top + cur[0] + 1};${cur[1] + 1 + PAD}H` : '';
-  if (!rows && curPos === prevCur) return;
-  prev = frame; prevCur = curPos;
-  w('\x1b[?2026h' + (rows ? '\x1b[?25l' + rows : '') + (curPos ? curPos + '\x1b[?25h' : '\x1b[?25l') + '\x1b[?2026l');
-}
-
-// ─── ui/screen.ts ──────────────────────────────────────────────────────────
-// The transcript and the low-level output API. In the full-screen TUI everything
-// goes into `log` and is drawn by render.ts; in print mode (-p, pipes) it is
-// written straight to stdout.
-
-// One logical transcript line. Wrapped to the screen width at render time (cached).
-interface Row {
-  s: string; md?: boolean; ind?: number; mark?: string; clip?: boolean; kind?: string;
-  dyn?: (w: number) => string[];   // drawn at the current width (e.g. the banner)
-  wr?: string[]; ww?: number; wf?: boolean;
-}
-
-const ui = { tui: false, scroll: 0, tick: 0, note: '', noteUntil: 0 };
-const log: Row[] = [];
-let open = false;   // TUI: the last row still receives streamed text
-let atBOL = true;   // print mode: cursor is at the beginning of a line
-let queued = false;
-
-function req() {
-  if (!ui.tui || queued) return;
-  queued = true;
-  setTimeout(() => { queued = false; render(); }, 16);
-}
-
-type RowOpts = { md?: boolean; ind?: number; mark?: string; kind?: string; clip?: boolean };
-
-// streamed text; `mark` decorates the first row of a new block
-function out(s: string, o: RowOpts = {}) {
-  if (!s) return;
-  if (!ui.tui) { spin.stop(); w(s); atBOL = s.endsWith('\n'); return; }
-  s.split('\n').forEach((p, i) => {
-    if (i > 0 || !open) log.push({ s: '', md: o.md, ind: o.ind, kind: o.kind, mark: !open && i === 0 ? o.mark : undefined });
-    const r = log[log.length - 1]; r.s += p; r.wr = undefined;
-  });
-  open = true; req();
-}
-
-function endLine() {
-  if (!ui.tui) { if (!atBOL) { w('\n'); atBOL = true; } return; }
-  if (open && log.length && log[log.length - 1].s === '') log.pop();
-  open = false;
-}
-
-function line(s = '', o: RowOpts = {}) {
-  if (!ui.tui) { spin.stop(); if (!atBOL) w('\n'); w((o.mark ?? '') + s + '\n'); atBOL = true; return; }
-  endLine();
-  for (const p of s.split('\n')) log.push({ ...o, s: p });
-  req();
-}
-
-function pushRows(rows: Row[]) {
-  if (!ui.tui) { for (const r of rows) line(r.s, r); return; }
-  endLine(); log.push(...rows); req();
-}
-
-// one blank row between blocks
-function gap() {
-  if (!ui.tui) return;
-  endLine();
-  if (log.length && log[log.length - 1].s !== '') log.push({ s: '' });
-}
-
-// transient message in the footer
-function note(s: string, ms = 2000) { ui.note = s; ui.noteUntil = Date.now() + ms; req(); }
-
-const spin = {
-  t: null as ReturnType<typeof setInterval> | null, text: '', on: false, i: 0,
-  start(text: string) {
-    this.text = text;
-    if (ui.tui) { this.on = true; req(); return; }
-    if (!TTY || this.t) return;
-    if (!atBOL) { w('\n'); atBOL = true; }
-    w('\x1b[?25l');
-    this.t = setInterval(() => this.draw(), 90); this.draw();
-  },
-  draw() {
-    const f = ['·  ', '·· ', '···', ' ··', '  ·', '   '][this.i++ % 6];
-    const q = queue.length ? gray(`  · ${queue.length} queued`) : '';
-    w(`\r\x1b[2K${cyan(f)} ${dim(clip(this.text, (process.stdout.columns || 80) - 20))}${q}`);
-  },
-  stop() {
-    if (ui.tui) { this.on = false; req(); return; }
-    if (this.t) { clearInterval(this.t); this.t = null; w('\r\x1b[2K\x1b[?25h'); }
-  },
-};
-
-// ─── tools/write.ts ────────────────────────────────────────────────────────
-function toolWrite(a: any): Result {
-  const abs = safePath(a.path);
-  if (typeof a.content !== 'string') throw new Error('content must be a string');
-  const existed = fs.existsSync(abs);
-  snapshot(abs);
-  fs.mkdirSync(path.dirname(abs), { recursive: true });
-  fs.writeFileSync(abs, a.content);
-  const n = a.content.split('\n').length;
-  return { text: `wrote ${relp(abs)} (${n} lines)`, show: gray(`${existed ? 'rewrote' : 'created'} · ${n} lines · ${kb(Buffer.byteLength(a.content))}`) };
-}
-
-// ─── tools/edit.ts ─────────────────────────────────────────────────────────
-function toolEdit(a: any): Result {
-  const abs = safePath(a.path);
-  if (!fs.existsSync(abs)) throw new Error(`${a.path} does not exist — use write to create it`);
-  const raw = fs.readFileSync(abs, 'utf8');
-  const crlf = raw.includes('\r\n');
-  let text = crlf ? raw.replace(/\r\n/g, '\n') : raw;
-  const edits = Array.isArray(a.edits) ? a.edits : [a];
-  let plus = 0, minus = 0;
-  for (const [i, e] of edits.entries()) {
-    const o = String(e.old ?? '').replace(/\r\n/g, '\n'), nw = String(e.new ?? '').replace(/\r\n/g, '\n');
-    if (!o) throw new Error(`edit #${i + 1}: old is empty`);
-    const first = text.indexOf(o);
-    if (first < 0) throw new Error(`edit #${i + 1}: old text not found in ${a.path} (must match exactly, including whitespace). No changes applied.`);
-    if (text.indexOf(o, first + 1) >= 0) throw new Error(`edit #${i + 1}: old text matches several places — add surrounding lines. No changes applied.`);
-    text = text.slice(0, first) + nw + text.slice(first + o.length);
-    minus += o.split('\n').length; plus += nw.split('\n').length;
-  }
-  snapshot(abs);
-  fs.writeFileSync(abs, crlf ? text.replace(/\n/g, '\r\n') : text);
-  return { text: `edited ${relp(abs)}`, show: `${green('+' + plus)} ${red('-' + minus)}` };
-}
-
-// ─── tools/read.ts ─────────────────────────────────────────────────────────
-function toolRead(a: any): Result {
-  const abs = safePath(a.path);
-  const st = fs.statSync(abs);
-  if (st.isDirectory()) {
-    const ents = fs.readdirSync(abs, { withFileTypes: true }).sort((x, y) => Number(y.isDirectory()) - Number(x.isDirectory()) || x.name.localeCompare(y.name));
-    const list = ents.slice(0, 500).map((e) => e.name + (e.isDirectory() ? '/' : '')).join('\n');
-    return { text: (list || '(empty)') + (ents.length > 500 ? `\n… ${ents.length - 500} more` : ''), show: gray(`${ents.length} entries`) };
-  }
-  const buf = fs.readFileSync(abs);
-  if (buf.subarray(0, 8000).includes(0)) return { text: `binary file, ${buf.length} bytes`, show: gray('binary') };
-  const lines = buf.toString('utf8').split('\n');
-  const from = Math.max(1, Number(a.offset) || 1);
-  const limit = Math.max(1, Number(a.limit) || 2000);
-  let body = lines.slice(from - 1, from - 1 + limit).join('\n');
-  if (body.length > 60_000) body = body.slice(0, 60_000) + '\n… [truncated]';
-  const end = Math.min(lines.length, from - 1 + limit);
-  if (end < lines.length) body += `\n… [${lines.length - end} more lines, read with offset=${end + 1}]`;
-  return { text: body, show: gray(from > 1 || end < lines.length ? `lines ${from}-${end} of ${lines.length}` : `${lines.length} lines`) };
-}
-
 // ─── shell/parse.ts ────────────────────────────────────────────────────────
 // Turns a raw shell command into a short, readable label:
 //   cd app && npm install express cors 2>&1 | tail -5
@@ -1700,6 +1424,336 @@ function shellLabel(cmd: string): string {
   return (cdDir ? gray(`in ${short(cdDir)} · `) : '') + label;
 }
 
+// ─── ui/draft.ts ───────────────────────────────────────────────────────────
+// Live preview of a tool call while the model is still streaming it:
+// file name, size, and the last lines of the content being written.
+
+const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const TITLE: Record<string, string> = { write: 'Write', edit: 'Update', read: 'Read' };
+
+// value of "key" in an unfinished JSON object; the last occurrence (edits stream several "new")
+function partialString(raw: string, key: string): string | null {
+  const re = new RegExp(`"${key}"\\s*:\\s*"`, 'g');
+  let m: RegExpExecArray | null, at = -1;
+  while ((m = re.exec(raw))) at = m.index + m[0].length;
+  if (at < 0) return null;
+  let out = '';
+  for (let i = at; i < raw.length;) {
+    const c = raw[i];
+    if (c === '"') break;
+    if (c !== '\\') { out += c; i++; continue; }
+    const n = raw[i + 1];
+    if (n === undefined) break;
+    if (n === 'u') { const h = raw.slice(i + 2, i + 6); if (h.length < 4) break; out += String.fromCharCode(parseInt(h, 16)); i += 6; continue; }
+    out += ({ n: '\n', t: '  ', r: '', b: '', f: '' } as Record<string, string>)[n] ?? n;
+    i += 2;
+  }
+  return out;
+}
+
+let cache = { raw: '', W: 0, rows: [] as string[] };
+
+function draftRows(W: number): string[] {
+  const d = agent.draft;
+  if (!d) return [];
+  if (cache.raw === d.raw && cache.W === W) return withSpinner(cache.rows);
+  const file = partialString(d.raw, 'path') ?? '';
+  let head: string, body: string | null = null;
+  if (d.name === 'shell') head = `${accent2('$')} ${shellLabel(partialString(d.raw, 'command') ?? '')}`;
+  else {
+    body = d.name === 'write' ? partialString(d.raw, 'content') : d.name === 'edit' ? partialString(d.raw, 'new') : null;
+    const lines = body === null ? 0 : body.split('\n').length;
+    head = `${bold(TITLE[d.name] || d.name)} ${file}${body !== null ? gray(`  · ${lines} lines · ${kb(Buffer.byteLength(body))}`) : ''}`;
+  }
+  const rows = [head];
+  if (body) {
+    const ls = body.split('\n');
+    const start = Math.max(0, ls.length - 6);
+    ls.slice(start).forEach((l, i) => rows.push(fit(gray(`    ${String(start + i + 1).padStart(4)} │ ${l}`), W)));
+  }
+  cache = { raw: d.raw, W, rows };
+  return withSpinner(rows);
+}
+
+const withSpinner = (rows: string[]) => [`${accent2(FRAMES[ui.tick % FRAMES.length])} ${rows[0]}`, ...rows.slice(1)];
+
+// ─── ui/render.ts ──────────────────────────────────────────────────────────
+// Full-screen frame: transcript, live status/cards, input box (or a modal),
+// command suggestions and the footer. Only changed rows are rewritten.
+
+// light inline markdown for assistant text
+function mdLine(s: string, fence: boolean): string {
+  if (/^\s*```/.test(s)) return gray(s);
+  if (fence) return code(s);
+  const h = /^(#{1,6})\s+(.*)$/.exec(s);
+  if (h) return bold(accent(h[2]));
+  if (/^\s*([-*_]\s*){3,}$/.test(s)) return gray('─'.repeat(24));
+  return s
+    .replace(/^(\s*)[-*+] /, (_, sp) => sp + accent('•') + ' ')
+    .replace(/^(\s*)> ?/, (_, sp) => sp + gray('│ '))
+    .replace(/`([^`]+)`/g, (_, x) => code(x))
+    .replace(/\*\*([^*]+)\*\*/g, (_, x) => bold(x));
+}
+
+function wrapLog(W: number): string[] {
+  const all: string[] = [];
+  let fence = false;
+  for (const r of log) {
+    const inFence = !!r.md && fence;
+    if (r.dyn) { if (!r.wr || r.ww !== W) { r.wr = r.dyn(W); r.ww = W; } for (const l of r.wr) all.push(l); continue; }
+    if (!r.wr || r.ww !== W || r.wf !== inFence) {
+      const ind = r.ind || 0;
+      const body = r.md ? mdLine(r.s, inFence) : r.s;
+      const lines = r.clip ? [fit(body, W - ind)] : wrapAnsi(body, W - ind);
+      r.wr = lines.map((l, i) => (i === 0 ? (r.mark ?? ' '.repeat(ind)) : ' '.repeat(ind)) + l);
+      r.ww = W; r.wf = inFence;
+    }
+    if (r.md && /^\s*```/.test(r.s)) fence = !fence;
+    for (const l of r.wr) all.push(l);
+  }
+  return all;
+}
+
+const STAR = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
+
+// running tool cards, shown right after the transcript
+function cardBlock(W: number): string[] {
+  if (!cards.length) return [];
+  const rows = log.length && log[log.length - 1].s !== '' && log[log.length - 1].kind !== 'tool' ? [''] : [];
+  for (const c of cards) rows.push(...cardRows(c, W));
+  return rows;
+}
+
+// status above the input: always two rows while working, so nothing above jumps
+function statusRows(W: number): string[] {
+  const busy = !!agent.ctrl;
+  if (!busy && !spin.on) return [''];
+  const rows: string[] = [];
+  let st = `${accent(STAR[ui.tick % STAR.length])} ${shimmer((spin.text || 'Working') + '…', ui.tick)}`;
+  if (busy) {
+    const secs = Math.floor((Date.now() - agent.t0) / 1000);
+    st += gray(` (${secs}s · ↓ ${kt(Math.round(agent.chars / 4))} tokens · esc to interrupt)`);
+  }
+  rows.push(fit(st, W));
+  const last = agent.thinking ? agent.thinkBuf.trim().split('\n').pop() || '' : '';
+  rows.push(last ? fit(gray(italic('  ' + last)), W) : '');
+  return rows;
+}
+
+function sugRows(sug: [string, string][], W: number): string[] {
+  const n = 8, sel = Math.min(editor.sel, sug.length - 1);
+  const start = Math.max(0, Math.min(sel - n + 1, sug.length - n));
+  return sug.slice(start, start + n).map(([c, d], i) => {
+    const on = start + i === sel;
+    return fit(`  ${on ? accent('❯') : ' '} ${pad(on ? accent(bold(c)) : c, 12)} ${on ? d : gray(d)}`, W);
+  });
+}
+
+function footer(W: number): string {
+  let left: string;
+  if (ui.note && Date.now() < ui.noteUntil) left = yellow(ui.note);
+  else if (ui.scroll > 0) left = accent(`↑ ${ui.scroll} lines up · PgDn to return`);
+  else if (agent.ctrl) left = gray('esc interrupt · enter queues a message');
+  else left = gray('/ commands · ↑↓ history · wheel/PgUp scroll');
+  const upd = cfg.latest && cmpVer(cfg.latest, VERSION) > 0 ? yellow(`↑ ${cfg.latest} · /update`) + gray(' · ') : '';
+  const right = upd + gray(`${modelLabel()} · ${cfg.effort}${cfg.fast ? ' · fast' : ''}${cfg.safe ? ' · safe' : ''}`);
+  const sp = W - vw(left) - vw(right);
+  return sp >= 2 ? left + ' '.repeat(sp) + right : fit(left, W);
+}
+
+let prev: string[] = [];
+let prevCur = '';
+let lastTotal = 0;
+const PAD = 2;   // same margin on the left and on the right
+
+function resetFrame() { prev = []; prevCur = ''; w('\x1b[2J'); }
+
+function render() {
+  if (!ui.tui) return;
+  const H = Math.max(8, process.stdout.rows || 24);
+  const W = Math.max(24, (process.stdout.columns || 80) - PAD * 2);
+  const bottom: string[] = [];
+  let cur: [number, number] | null = null;
+  const m = M.modal;
+  if (m) {
+    const maxBody = H - 3 - (m.full ? 0 : 4);
+    const r = m.render(W - 4, maxBody);
+    const body = r.rows.slice(0, maxBody);
+    if (m.full) while (body.length < maxBody) body.push('');
+    bottom.push(...boxed(body, W, m.title, borderHi));
+    if (r.cur) cur = [r.cur[0] + 1, r.cur[1] + 2];
+  } else {
+    bottom.push(...statusRows(W));
+    for (const q of queue) bottom.push(fit(gray(`  ⏎ ${q.replace(/\n/g, ' ')}`), W));
+    const iv = inputView(W - 4);
+    cur = [bottom.length + 1 + iv.cur[0], 2 + iv.cur[1]];
+    bottom.push(...boxed(iv.rows, W, '', agent.ctrl ? border : borderHi));
+    const sug = suggestions();
+    if (sug.length) bottom.push(...sugRows(sug, W));
+  }
+  const vh = Math.max(0, H - 1 - bottom.length);
+  const all = m?.full ? [] : [...wrapLog(W), ...cardBlock(W), ...draftRows(W)];
+  if (ui.scroll > 0 && all.length > lastTotal) ui.scroll += all.length - lastTotal;
+  lastTotal = all.length;
+  ui.scroll = Math.max(0, Math.min(ui.scroll, all.length - vh));
+  const end = all.length - ui.scroll;
+  const view = all.slice(Math.max(0, end - vh), end);
+  // transcript on top, input area pinned to the bottom
+  const frame = [...view];
+  while (frame.length < H - 1 - bottom.length) frame.push('');
+  const top = frame.length;
+  frame.push(...bottom, footer(W));
+  // only rewrite rows that changed; an unchanged frame writes nothing (no cursor flicker)
+  let rows = '';
+  frame.slice(0, H).forEach((r, i) => { if (prev[i] !== r) rows += `\x1b[${i + 1};1H\x1b[2K${' '.repeat(PAD)}${r}\x1b[0m`; });
+  const curPos = cur ? `\x1b[${top + cur[0] + 1};${cur[1] + 1 + PAD}H` : '';
+  if (!rows && curPos === prevCur) return;
+  prev = frame; prevCur = curPos;
+  w('\x1b[?2026h' + (rows ? '\x1b[?25l' + rows : '') + (curPos ? curPos + '\x1b[?25h' : '\x1b[?25l') + '\x1b[?2026l');
+}
+
+// ─── ui/screen.ts ──────────────────────────────────────────────────────────
+// The transcript and the low-level output API. In the full-screen TUI everything
+// goes into `log` and is drawn by render.ts; in print mode (-p, pipes) it is
+// written straight to stdout.
+
+// One logical transcript line. Wrapped to the screen width at render time (cached).
+interface Row {
+  s: string; md?: boolean; ind?: number; mark?: string; clip?: boolean; kind?: string;
+  dyn?: (w: number) => string[];   // drawn at the current width (e.g. the banner)
+  wr?: string[]; ww?: number; wf?: boolean;
+}
+
+const ui = { tui: false, scroll: 0, tick: 0, note: '', noteUntil: 0 };
+const log: Row[] = [];
+let open = false;   // TUI: the last row still receives streamed text
+let atBOL = true;   // print mode: cursor is at the beginning of a line
+let queued = false;
+
+function req() {
+  if (!ui.tui || queued) return;
+  queued = true;
+  setTimeout(() => { queued = false; render(); }, 16);
+}
+
+type RowOpts = { md?: boolean; ind?: number; mark?: string; kind?: string; clip?: boolean };
+
+// streamed text; `mark` decorates the first row of a new block
+function out(s: string, o: RowOpts = {}) {
+  if (!s) return;
+  if (!ui.tui) { spin.stop(); w(s); atBOL = s.endsWith('\n'); return; }
+  s.split('\n').forEach((p, i) => {
+    if (i > 0 || !open) log.push({ s: '', md: o.md, ind: o.ind, kind: o.kind, mark: !open && i === 0 ? o.mark : undefined });
+    const r = log[log.length - 1]; r.s += p; r.wr = undefined;
+  });
+  open = true; req();
+}
+
+function endLine() {
+  if (!ui.tui) { if (!atBOL) { w('\n'); atBOL = true; } return; }
+  if (open && log.length && log[log.length - 1].s === '') log.pop();
+  open = false;
+}
+
+function line(s = '', o: RowOpts = {}) {
+  if (!ui.tui) { spin.stop(); if (!atBOL) w('\n'); w((o.mark ?? '') + s + '\n'); atBOL = true; return; }
+  endLine();
+  for (const p of s.split('\n')) log.push({ ...o, s: p });
+  req();
+}
+
+function pushRows(rows: Row[]) {
+  if (!ui.tui) { for (const r of rows) line(r.s, r); return; }
+  endLine(); log.push(...rows); req();
+}
+
+// one blank row between blocks
+function gap() {
+  if (!ui.tui) return;
+  endLine();
+  if (log.length && log[log.length - 1].s !== '') log.push({ s: '' });
+}
+
+// transient message in the footer
+function note(s: string, ms = 2000) { ui.note = s; ui.noteUntil = Date.now() + ms; req(); }
+
+const spin = {
+  t: null as ReturnType<typeof setInterval> | null, text: '', on: false, i: 0,
+  start(text: string) {
+    this.text = text;
+    if (ui.tui) { this.on = true; req(); return; }
+    if (!TTY || this.t) return;
+    if (!atBOL) { w('\n'); atBOL = true; }
+    w('\x1b[?25l');
+    this.t = setInterval(() => this.draw(), 90); this.draw();
+  },
+  draw() {
+    const f = ['·  ', '·· ', '···', ' ··', '  ·', '   '][this.i++ % 6];
+    const q = queue.length ? gray(`  · ${queue.length} queued`) : '';
+    w(`\r\x1b[2K${cyan(f)} ${dim(clip(this.text, (process.stdout.columns || 80) - 20))}${q}`);
+  },
+  stop() {
+    if (ui.tui) { this.on = false; req(); return; }
+    if (this.t) { clearInterval(this.t); this.t = null; w('\r\x1b[2K\x1b[?25h'); }
+  },
+};
+
+// ─── tools/write.ts ────────────────────────────────────────────────────────
+function toolWrite(a: any): Result {
+  const abs = safePath(a.path);
+  if (typeof a.content !== 'string') throw new Error('content must be a string');
+  const existed = fs.existsSync(abs);
+  snapshot(abs);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, a.content);
+  const n = a.content.split('\n').length;
+  return { text: `wrote ${relp(abs)} (${n} lines)`, show: gray(`${existed ? 'rewrote' : 'created'} · ${n} lines · ${kb(Buffer.byteLength(a.content))}`) };
+}
+
+// ─── tools/edit.ts ─────────────────────────────────────────────────────────
+function toolEdit(a: any): Result {
+  const abs = safePath(a.path);
+  if (!fs.existsSync(abs)) throw new Error(`${a.path} does not exist — use write to create it`);
+  const raw = fs.readFileSync(abs, 'utf8');
+  const crlf = raw.includes('\r\n');
+  let text = crlf ? raw.replace(/\r\n/g, '\n') : raw;
+  const edits = Array.isArray(a.edits) ? a.edits : [a];
+  let plus = 0, minus = 0;
+  for (const [i, e] of edits.entries()) {
+    const o = String(e.old ?? '').replace(/\r\n/g, '\n'), nw = String(e.new ?? '').replace(/\r\n/g, '\n');
+    if (!o) throw new Error(`edit #${i + 1}: old is empty`);
+    const first = text.indexOf(o);
+    if (first < 0) throw new Error(`edit #${i + 1}: old text not found in ${a.path} (must match exactly, including whitespace). No changes applied.`);
+    if (text.indexOf(o, first + 1) >= 0) throw new Error(`edit #${i + 1}: old text matches several places — add surrounding lines. No changes applied.`);
+    text = text.slice(0, first) + nw + text.slice(first + o.length);
+    minus += o.split('\n').length; plus += nw.split('\n').length;
+  }
+  snapshot(abs);
+  fs.writeFileSync(abs, crlf ? text.replace(/\n/g, '\r\n') : text);
+  return { text: `edited ${relp(abs)}`, show: `${green('+' + plus)} ${red('-' + minus)}` };
+}
+
+// ─── tools/read.ts ─────────────────────────────────────────────────────────
+function toolRead(a: any): Result {
+  const abs = safePath(a.path);
+  const st = fs.statSync(abs);
+  if (st.isDirectory()) {
+    const ents = fs.readdirSync(abs, { withFileTypes: true }).sort((x, y) => Number(y.isDirectory()) - Number(x.isDirectory()) || x.name.localeCompare(y.name));
+    const list = ents.slice(0, 500).map((e) => e.name + (e.isDirectory() ? '/' : '')).join('\n');
+    return { text: (list || '(empty)') + (ents.length > 500 ? `\n… ${ents.length - 500} more` : ''), show: gray(`${ents.length} entries`) };
+  }
+  const buf = fs.readFileSync(abs);
+  if (buf.subarray(0, 8000).includes(0)) return { text: `binary file, ${buf.length} bytes`, show: gray('binary') };
+  const lines = buf.toString('utf8').split('\n');
+  const from = Math.max(1, Number(a.offset) || 1);
+  const limit = Math.max(1, Number(a.limit) || 2000);
+  let body = lines.slice(from - 1, from - 1 + limit).join('\n');
+  if (body.length > 60_000) body = body.slice(0, 60_000) + '\n… [truncated]';
+  const end = Math.min(lines.length, from - 1 + limit);
+  if (end < lines.length) body += `\n… [${lines.length - end} more lines, read with offset=${end + 1}]`;
+  return { text: body, show: gray(from > 1 || end < lines.length ? `lines ${from}-${end} of ${lines.length}` : `${lines.length} lines`) };
+}
+
 // ─── tools/index.ts ────────────────────────────────────────────────────────
 // Tool schemas sent to the model, dispatch, and parallel execution.
 
@@ -1813,14 +1867,15 @@ function endThink() {
   line(gray(italic(`Thought for ${secs}s`)), { ind: 2, mark: gray('∴ '), kind: 'think' });
 }
 
-function endStream() { endThink(); endLine(); agent.mode = ''; }
+function endStream() { endThink(); endLine(); agent.mode = ''; agent.draft = null; }
 
-const DOING: Record<string, string> = { write: 'Writing', edit: 'Editing', read: 'Reading', shell: 'Preparing command' };
+const DOING: Record<string, string> = { write: 'Writing', edit: 'Editing', read: 'Reading', shell: 'Preparing' };
 
 // the model is streaming tool-call arguments
 function toolProgress(name: string, raw: string) {
   const p = /"path"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(raw)?.[1] ?? /"command"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(raw)?.[1] ?? '';
   if (agent.mode) { endThink(); endLine(); agent.mode = ''; }
+  if (ui.tui) { gap(); agent.draft = { name, raw }; spin.start(DOING[name] || name); return; }
   const what = name === 'shell' ? '' : p.replace(/\\n/g, ' ');
   spin.start(`${DOING[name] || name}${what ? ' ' + what : ''}  ${kb(raw.length)}`);
 }
@@ -2006,7 +2061,7 @@ async function runTurn(text: string) {
     if (sig.aborted) line(yellow('■ interrupted'), { ind: 2 });
     else line(red(`✗ ${e.message}`) + (/effort|thinking|adaptive/i.test(e.message) && cfg.effort !== 'auto' ? gray('  (try /think auto)') : ''), { ind: 2 });
   } finally {
-    agent.ctrl = null; agent.thinking = false;
+    agent.ctrl = null; agent.thinking = false; agent.draft = null;
     spin.stop();
     if (undoStack[undoStack.length - 1]?.size === 0) undoStack.pop();
   }

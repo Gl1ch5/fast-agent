@@ -6,6 +6,7 @@ import { log, ui, spin } from './screen.ts';
 import { M } from './modal.ts';
 import { editor, queue, suggestions, inputView } from './input.ts';
 import { cards, cardRows } from './cards.ts';
+import { draftRows } from './draft.ts';
 import { agent } from '../agent/state.ts';
 import { cfg, modelLabel } from '../config.ts';
 import { VERSION } from '../version.ts';
@@ -122,7 +123,7 @@ export function render() {
     if (sug.length) bottom.push(...sugRows(sug, W));
   }
   const vh = Math.max(0, H - 1 - bottom.length);
-  const all = m?.full ? [] : [...wrapLog(W), ...cardBlock(W)];
+  const all = m?.full ? [] : [...wrapLog(W), ...cardBlock(W), ...draftRows(W)];
   if (ui.scroll > 0 && all.length > lastTotal) ui.scroll += all.length - lastTotal;
   lastTotal = all.length;
   ui.scroll = Math.max(0, Math.min(ui.scroll, all.length - vh));

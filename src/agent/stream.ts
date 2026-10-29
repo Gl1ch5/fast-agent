@@ -33,14 +33,15 @@ export function endThink() {
   line(gray(italic(`Thought for ${secs}s`)), { ind: 2, mark: gray('∴ '), kind: 'think' });
 }
 
-export function endStream() { endThink(); endLine(); agent.mode = ''; }
+export function endStream() { endThink(); endLine(); agent.mode = ''; agent.draft = null; }
 
-const DOING: Record<string, string> = { write: 'Writing', edit: 'Editing', read: 'Reading', shell: 'Preparing command' };
+const DOING: Record<string, string> = { write: 'Writing', edit: 'Editing', read: 'Reading', shell: 'Preparing' };
 
 // the model is streaming tool-call arguments
 export function toolProgress(name: string, raw: string) {
   const p = /"path"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(raw)?.[1] ?? /"command"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(raw)?.[1] ?? '';
   if (agent.mode) { endThink(); endLine(); agent.mode = ''; }
+  if (ui.tui) { gap(); agent.draft = { name, raw }; spin.start(DOING[name] || name); return; }
   const what = name === 'shell' ? '' : p.replace(/\\n/g, ' ');
   spin.start(`${DOING[name] || name}${what ? ' ' + what : ''}  ${kb(raw.length)}`);
 }

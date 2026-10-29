@@ -48,7 +48,7 @@ export async function runTurn(text: string) {
     if (sig.aborted) line(yellow('■ interrupted'), { ind: 2 });
     else line(red(`✗ ${e.message}`) + (/effort|thinking|adaptive/i.test(e.message) && cfg.effort !== 'auto' ? gray('  (try /think auto)') : ''), { ind: 2 });
   } finally {
-    agent.ctrl = null; agent.thinking = false;
+    agent.ctrl = null; agent.thinking = false; agent.draft = null;
     spin.stop();
     if (undoStack[undoStack.length - 1]?.size === 0) undoStack.pop();
   }

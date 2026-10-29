@@ -17,4 +17,5 @@ export const agent = {
   t0: 0, chars: 0,
   mode: '' as 'text' | 'think' | '',
   thinking: false, thinkBuf: '', thinkT0: 0,
+  draft: null as { name: string; raw: string } | null,   // tool call still being streamed
 };
