@@ -1,7 +1,7 @@
 // Full-screen frame: transcript, live status/cards, input box (or a modal),
 // command suggestions and the footer. Only changed rows are rewritten.
 import { w } from '../env.ts';
-import { accent, bold, code, gray, italic, yellow, fit, pad, vw, wrapAnsi, boxed, shimmer } from './ansi.ts';
+import { accent, bold, code, gray, italic, yellow, fit, pad, vw, wrapAnsi, boxed, shimmer, border, borderHi } from './ansi.ts';
 import { log, ui, spin } from './screen.ts';
 import { M } from './modal.ts';
 import { editor, queue, suggestions, inputView } from './input.ts';
@@ -79,7 +79,7 @@ function footer(W: number): string {
   if (ui.note && Date.now() < ui.noteUntil) left = yellow(ui.note);
   else if (ui.scroll > 0) left = accent(`↑ ${ui.scroll} lines up · PgDn to return`);
   else if (agent.ctrl) left = gray('esc interrupt · enter queues a message');
-  else left = gray('/ commands · ↑↓ history · PgUp/PgDn scroll');
+  else left = gray('/ commands · ↑↓ history · wheel/PgUp scroll');
   const upd = cfg.latest && cmpVer(cfg.latest, VERSION) > 0 ? yellow(`↑ ${cfg.latest} · /update`) + gray(' · ') : '';
   const right = upd + gray(`${modelLabel()} · ${cfg.effort}${cfg.fast ? ' · fast' : ''}${cfg.safe ? ' · safe' : ''}`);
   const sp = W - 1 - vw(left) - vw(right);
@@ -103,14 +103,14 @@ export function render() {
     const r = m.render(W - 4, maxBody);
     const body = r.rows.slice(0, maxBody);
     if (m.full) while (body.length < maxBody) body.push('');
-    bottom.push(...boxed(body, W, m.title, accent));
+    bottom.push(...boxed(body, W, m.title, borderHi));
     if (r.cur) cur = [r.cur[0] + 1, r.cur[1] + 2];
   } else {
     bottom.push(...liveRows(W).slice(-Math.max(3, Math.floor(H / 2))));
     for (const q of queue) bottom.push(fit(gray(`  ⏎ ${q.replace(/\n/g, ' ')}`), W));
     const iv = inputView(W - 4);
     cur = [bottom.length + 1 + iv.cur[0], 2 + iv.cur[1]];
-    bottom.push(...boxed(iv.rows, W, '', agent.ctrl ? gray : accent));
+    bottom.push(...boxed(iv.rows, W, '', agent.ctrl ? border : borderHi));
     const sug = suggestions();
     if (sug.length) bottom.push(...sugRows(sug, W));
   }
@@ -121,12 +121,14 @@ export function render() {
   ui.scroll = Math.max(0, Math.min(ui.scroll, all.length - vh));
   const end = all.length - ui.scroll;
   const view = all.slice(Math.max(0, end - vh), end);
-  const frame = [...view, ...bottom];
-  while (frame.length < H - 1) frame.push('');
-  frame.push(footer(W));
+  // transcript on top, input area pinned to the bottom
+  const frame = [...view];
+  while (frame.length < H - 1 - bottom.length) frame.push('');
+  const top = frame.length;
+  frame.push(...bottom, footer(W));
   let o = '\x1b[?2026h\x1b[?25l';
   frame.slice(0, H).forEach((r, i) => { if (prev[i] !== r) o += `\x1b[${i + 1};1H\x1b[2K${r}\x1b[0m`; });
   prev = frame;
-  if (cur) o += `\x1b[${view.length + cur[0] + 1};${cur[1] + 1}H\x1b[?25h`;
+  if (cur) o += `\x1b[${top + cur[0] + 1};${cur[1] + 1}H\x1b[?25h`;
   w(o + '\x1b[?2026l');
 }

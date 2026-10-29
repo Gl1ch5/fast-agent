@@ -11,7 +11,7 @@ DIR="${FA_BIN:-$HOME/.fa/bin}"
 # ─── look ────────────────────────────────────────────────────────────────────
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   E=$(printf '\033'); R="$E[0m"; B="$E[1m"; D="$E[2m"; G="$E[90m"
-  OK="$E[32m"; WARN="$E[33m"; ERR="$E[31m"; AC="$E[38;5;141m"; AC2="$E[38;5;45m"; FANCY=1
+  OK="$E[32m"; WARN="$E[33m"; ERR="$E[31m"; AC="$E[38;5;240m"; AC2="$E[38;5;252m"; FANCY=1
 else
   E=''; R=''; B=''; D=''; G=''; OK=''; WARN=''; ERR=''; AC=''; AC2=''; FANCY=''
 fi
@@ -19,7 +19,7 @@ fi
 logo() {
   i=0
   for l in '███████╗ █████╗ ' '██╔════╝██╔══██╗' '█████╗  ███████║' '██╔══╝  ██╔══██║' '██║     ██║  ██║' '╚═╝     ╚═╝  ╚═╝'; do
-    set -- 141 135 99 69 75 45; shift $i
+    set -- 241 243 245 248 251 254; shift $i
     if [ -n "$FANCY" ]; then printf '  %s[38;5;%sm%s%s\n' "$E" "$1" "$l" "$R"; sleep 0.04; else printf '  %s\n' "$l"; fi
     i=$((i + 1))
   done

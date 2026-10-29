@@ -2,7 +2,7 @@
 import { IS_WIN, TTY } from '../env.ts';
 
 const sty = (n: string) => (s: string) => (TTY ? `\x1b[${n}m${s}\x1b[0m` : s);
-export const dim = sty('2'), bold = sty('1'), italic = sty('3'), red = sty('31'), green = sty('32'), yellow = sty('33');
+export const dim = sty('2'), bold = sty('1'), italic = sty('3');
 export const cyan = sty('36'), gray = sty('90'), magenta = sty('35');
 
 // ─── true color (falls back to the 256-color cube) ───
@@ -14,14 +14,17 @@ export const fgc = ([r, g, b]: RGB) => (TRUECOLOR
   : `\x1b[38;5;${16 + 36 * Math.round(r / 51) + 6 * Math.round(g / 51) + Math.round(b / 51)}m`);
 export const rgb = (c: RGB) => (s: string) => (TTY ? fgc(c) + s + '\x1b[39m' : s);
 
-export const VIOLET: RGB = [167, 139, 250], SKY: RGB = [56, 189, 248];
-export const accent = rgb(VIOLET), accent2 = rgb(SKY), code = rgb([240, 180, 120]);
+// graphite palette: neutral grays, near-white highlight, muted status colors
+export const SHADE: RGB = [96, 98, 104], LIGHT: RGB = [232, 233, 236];
+export const accent = rgb([228, 229, 232]), accent2 = rgb([150, 153, 160]), code = rgb([196, 186, 168]);
+export const border = rgb([78, 80, 86]), borderHi = rgb([128, 131, 138]);
+export const red = rgb([224, 108, 108]), green = rgb([128, 190, 136]), yellow = rgb([214, 184, 112]);
 
 export const lerp = (a: RGB, b: RGB, t: number): RGB =>
   [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t)) as RGB;
 
 // moving two-color gradient across a string
-export function gradient(s: string, phase = 0, a = VIOLET, b = SKY) {
+export function gradient(s: string, phase = 0, a = SHADE, b = LIGHT) {
   if (!TTY) return s;
   const cs = Array.from(s);
   return cs.map((ch, i) => fgc(lerp(a, b, (Math.sin((i / Math.max(10, cs.length)) * Math.PI * 2 - phase) + 1) / 2)) + ch).join('') + '\x1b[39m';

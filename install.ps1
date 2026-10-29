@@ -14,7 +14,7 @@ try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 # ─── look ────────────────────────────────────────────────────────────────────
 function Show-Logo {
   $lines = '███████╗ █████╗ ', '██╔════╝██╔══██╗', '█████╗  ███████║', '██╔══╝  ██╔══██║', '██║     ██║  ██║', '╚═╝     ╚═╝  ╚═╝'
-  $colors = 'Magenta', 'Magenta', 'DarkMagenta', 'Blue', 'Cyan', 'Cyan'
+  $colors = 'DarkGray', 'DarkGray', 'Gray', 'Gray', 'White', 'White'
   Write-Host ''
   for ($i = 0; $i -lt $lines.Count; $i++) { Write-Host "  $($lines[$i])" -ForegroundColor $colors[$i]; Start-Sleep -Milliseconds 40 }
   Write-Host '  fast agent' -NoNewline; Write-Host ' · installer' -ForegroundColor DarkGray
@@ -61,7 +61,7 @@ $task = $wc.DownloadFileTaskAsync("$repo/fa.ts?t=$([DateTimeOffset]::UtcNow.ToUn
 $frames = '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'
 $n = 0
 while (-not $task.IsCompleted) {
-  Write-Host "`r  $($frames[$n % 10]) " -ForegroundColor Magenta -NoNewline
+  Write-Host "`r  $($frames[$n % 10]) " -ForegroundColor Gray -NoNewline
   Write-Host "downloading fa ($ref)" -NoNewline
   Start-Sleep -Milliseconds 80; $n++
 }
@@ -82,7 +82,7 @@ Show-Ok 'launcher' (Get-ShortPath "$dir\fa.cmd")
 if (Test-Node) {
   Show-Ok 'node' (& node -v)
 } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
-  Show-Row '…' 'Magenta' 'node' 'installing Node.js LTS via winget'
+  Show-Row '…' 'Gray' 'node' 'installing Node.js LTS via winget'
   winget install -e --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements | Out-Null
   $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
   if (Test-Node) { Show-Ok 'node' (& node -v) '(installed)' } else { Show-Warn 'node' 'winget could not install it' '→ https://nodejs.org (22.18+)' }
@@ -112,10 +112,10 @@ $title = if (-not $old) { "fa $new installed" }
 $w = 44
 $bar = '─' * $w
 Write-Host ''
-Write-Host "  ╭$bar╮" -ForegroundColor Magenta
-Write-Host '  │ ' -ForegroundColor Magenta -NoNewline; Write-Host $title.PadRight($w - 2) -NoNewline; Write-Host ' │' -ForegroundColor Magenta
-Write-Host '  │ ' -ForegroundColor Magenta -NoNewline; Write-Host 'run: fa'.PadRight($w - 2) -ForegroundColor Cyan -NoNewline; Write-Host ' │' -ForegroundColor Magenta
-Write-Host "  ╰$bar╯" -ForegroundColor Magenta
+Write-Host "  ╭$bar╮" -ForegroundColor DarkGray
+Write-Host '  │ ' -ForegroundColor DarkGray -NoNewline; Write-Host $title.PadRight($w - 2) -NoNewline; Write-Host ' │' -ForegroundColor DarkGray
+Write-Host '  │ ' -ForegroundColor DarkGray -NoNewline; Write-Host 'run: fa'.PadRight($w - 2) -ForegroundColor White -NoNewline; Write-Host ' │' -ForegroundColor DarkGray
+Write-Host "  ╰$bar╯" -ForegroundColor DarkGray
 if ($newTerm) { Write-Host '  works in this window now; other open terminals need a restart' -ForegroundColor DarkGray }
 Write-Host ''
 try { [Console]::OutputEncoding = $prevEnc } catch {}

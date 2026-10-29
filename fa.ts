@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 // ─── version.ts ────────────────────────────────────────────────────────────
@@ -133,7 +134,7 @@ const modelLabel = () => (cfg.provider && cfg.model ? `${cfg.provider}/${cfg.mod
 // Colors, gradients and ANSI-aware width / clip / wrap helpers.
 
 const sty = (n: string) => (s: string) => (TTY ? `\x1b[${n}m${s}\x1b[0m` : s);
-const dim = sty('2'), bold = sty('1'), italic = sty('3'), red = sty('31'), green = sty('32'), yellow = sty('33');
+const dim = sty('2'), bold = sty('1'), italic = sty('3');
 const cyan = sty('36'), gray = sty('90'), magenta = sty('35');
 
 // ─── true color (falls back to the 256-color cube) ───
@@ -145,14 +146,17 @@ const fgc = ([r, g, b]: RGB) => (TRUECOLOR
   : `\x1b[38;5;${16 + 36 * Math.round(r / 51) + 6 * Math.round(g / 51) + Math.round(b / 51)}m`);
 const rgb = (c: RGB) => (s: string) => (TTY ? fgc(c) + s + '\x1b[39m' : s);
 
-const VIOLET: RGB = [167, 139, 250], SKY: RGB = [56, 189, 248];
-const accent = rgb(VIOLET), accent2 = rgb(SKY), code = rgb([240, 180, 120]);
+// graphite palette: neutral grays, near-white highlight, muted status colors
+const SHADE: RGB = [96, 98, 104], LIGHT: RGB = [232, 233, 236];
+const accent = rgb([228, 229, 232]), accent2 = rgb([150, 153, 160]), code = rgb([196, 186, 168]);
+const border = rgb([78, 80, 86]), borderHi = rgb([128, 131, 138]);
+const red = rgb([224, 108, 108]), green = rgb([128, 190, 136]), yellow = rgb([214, 184, 112]);
 
 const lerp = (a: RGB, b: RGB, t: number): RGB =>
   [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t)) as RGB;
 
 // moving two-color gradient across a string
-function gradient(s: string, phase = 0, a = VIOLET, b = SKY) {
+function gradient(s: string, phase = 0, a = SHADE, b = LIGHT) {
   if (!TTY) return s;
   const cs = Array.from(s);
   return cs.map((ch, i) => fgc(lerp(a, b, (Math.sin((i / Math.max(10, cs.length)) * Math.PI * 2 - phase) + 1) / 2)) + ch).join('') + '\x1b[39m';
@@ -495,7 +499,7 @@ function banner() {
     gray(`cwd  ${tildify(ROOT)}`),
     gray('/ for commands · /setup to configure · /model to switch'),
   ];
-  for (const r of boxed(rows, W, '', accent)) log.push({ s: r, clip: true });
+  for (const r of boxed(rows, W, '', border)) log.push({ s: r, clip: true });
   log.push({ s: '' });
   req();
 }
@@ -900,10 +904,17 @@ async function chooseKey() {
 
 function startTui() {
   ui.tui = true;
-  readline.emitKeypressEvents(process.stdin);
+  // mouse reports are cut out of stdin before readline parses the keys,
+  // so the wheel scrolls the transcript instead of arriving as ↑↓ (history)
+  const keys = new PassThrough();
+  readline.emitKeypressEvents(keys);
+  keys.on('keypress', (s, k) => onKey(s, k || {}));
   process.stdin.setRawMode(true);
-  process.stdin.on('keypress', (s, k) => onKey(s, k || {}));
-  w('\x1b[?1049h\x1b[?2004h');
+  process.stdin.on('data', (d: Buffer) => {
+    const rest = d.toString('utf8').replace(/\x1b\[<(\d+);\d+;\d+[Mm]/g, (_, b) => { wheel(Number(b)); return ''; });
+    if (rest) keys.write(rest);
+  });
+  w('\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h');
   resetFrame();
   process.stdout.on('resize', () => { resetFrame(); render(); });
   setInterval(() => {
@@ -914,13 +925,20 @@ function startTui() {
   render();
 }
 
+function wheel(b: number) {
+  if (b !== 64 && b !== 65) return;   // only the wheel; clicks are ignored
+  if (M.modal) return onKey(undefined, { name: b === 64 ? 'up' : 'down' });
+  ui.scroll = Math.max(0, ui.scroll + (b === 64 ? 3 : -3));
+  req();
+}
+
 // back to the normal screen; the transcript is printed so it stays in scrollback
 function leaveTui(dump = true) {
   if (!ui.tui) return;
   const W = Math.max(24, (process.stdout.columns || 80) - 1);
   const rows = dump ? wrapLog(W) : [];
   ui.tui = false;
-  w('\x1b[?2004l\x1b[?25h\x1b[?1049l');
+  w('\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[?1049l');
   try { process.stdin.setRawMode(false); } catch {}
   if (rows.length) w(rows.slice(-500).join('\x1b[0m\n') + '\x1b[0m\n');
 }
@@ -1004,7 +1022,7 @@ async function command(input: string): Promise<boolean> {
       gap();
       for (const [c, d] of COMMANDS) line(`${pad(accent(c), 11)} ${d}`, { ind: 2 });
       line(gray('Esc stops the agent · Enter while it works queues a message · Ctrl+J or \\+Enter = new line'), { ind: 2 });
-      line(gray('↑↓ history · Tab completes a command · PgUp/PgDn or Shift+↑↓ scroll · Ctrl+L redraw · Ctrl+C ×2 quit'), { ind: 2 });
+      line(gray('↑↓ history · Tab completes a command · mouse wheel, PgUp/PgDn or Shift+↑↓ scroll · Shift+drag selects text · Ctrl+L redraw · Ctrl+C ×2 quit'), { ind: 2 });
       break;
     case '/clear': case '/new':
       conv.history = []; conv.system = systemPrompt(); usage.in = usage.out = usage.cache = 0;
@@ -1286,7 +1304,7 @@ function footer(W: number): string {
   if (ui.note && Date.now() < ui.noteUntil) left = yellow(ui.note);
   else if (ui.scroll > 0) left = accent(`↑ ${ui.scroll} lines up · PgDn to return`);
   else if (agent.ctrl) left = gray('esc interrupt · enter queues a message');
-  else left = gray('/ commands · ↑↓ history · PgUp/PgDn scroll');
+  else left = gray('/ commands · ↑↓ history · wheel/PgUp scroll');
   const upd = cfg.latest && cmpVer(cfg.latest, VERSION) > 0 ? yellow(`↑ ${cfg.latest} · /update`) + gray(' · ') : '';
   const right = upd + gray(`${modelLabel()} · ${cfg.effort}${cfg.fast ? ' · fast' : ''}${cfg.safe ? ' · safe' : ''}`);
   const sp = W - 1 - vw(left) - vw(right);
@@ -1310,14 +1328,14 @@ function render() {
     const r = m.render(W - 4, maxBody);
     const body = r.rows.slice(0, maxBody);
     if (m.full) while (body.length < maxBody) body.push('');
-    bottom.push(...boxed(body, W, m.title, accent));
+    bottom.push(...boxed(body, W, m.title, borderHi));
     if (r.cur) cur = [r.cur[0] + 1, r.cur[1] + 2];
   } else {
     bottom.push(...liveRows(W).slice(-Math.max(3, Math.floor(H / 2))));
     for (const q of queue) bottom.push(fit(gray(`  ⏎ ${q.replace(/\n/g, ' ')}`), W));
     const iv = inputView(W - 4);
     cur = [bottom.length + 1 + iv.cur[0], 2 + iv.cur[1]];
-    bottom.push(...boxed(iv.rows, W, '', agent.ctrl ? gray : accent));
+    bottom.push(...boxed(iv.rows, W, '', agent.ctrl ? border : borderHi));
     const sug = suggestions();
     if (sug.length) bottom.push(...sugRows(sug, W));
   }
@@ -1328,13 +1346,15 @@ function render() {
   ui.scroll = Math.max(0, Math.min(ui.scroll, all.length - vh));
   const end = all.length - ui.scroll;
   const view = all.slice(Math.max(0, end - vh), end);
-  const frame = [...view, ...bottom];
-  while (frame.length < H - 1) frame.push('');
-  frame.push(footer(W));
+  // transcript on top, input area pinned to the bottom
+  const frame = [...view];
+  while (frame.length < H - 1 - bottom.length) frame.push('');
+  const top = frame.length;
+  frame.push(...bottom, footer(W));
   let o = '\x1b[?2026h\x1b[?25l';
   frame.slice(0, H).forEach((r, i) => { if (prev[i] !== r) o += `\x1b[${i + 1};1H\x1b[2K${r}\x1b[0m`; });
   prev = frame;
-  if (cur) o += `\x1b[${view.length + cur[0] + 1};${cur[1] + 1}H\x1b[?25h`;
+  if (cur) o += `\x1b[${top + cur[0] + 1};${cur[1] + 1}H\x1b[?25h`;
   w(o + '\x1b[?2026l');
 }
 

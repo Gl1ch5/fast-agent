@@ -1,5 +1,5 @@
 // First-run splash with an animated gradient logo, and the banner at the top of the transcript.
-import { accent, bold, gray, gradient, shimmer, center, boxed } from './ansi.ts';
+import { accent, bold, gray, gradient, shimmer, center, boxed, border } from './ansi.ts';
 import { M } from './modal.ts';
 import { log, req, ui } from './screen.ts';
 import { VERSION } from '../version.ts';
@@ -48,7 +48,7 @@ export function banner() {
     gray(`cwd  ${tildify(ROOT)}`),
     gray('/ for commands · /setup to configure · /model to switch'),
   ];
-  for (const r of boxed(rows, W, '', accent)) log.push({ s: r, clip: true });
+  for (const r of boxed(rows, W, '', border)) log.push({ s: r, clip: true });
   log.push({ s: '' });
   req();
 }
