@@ -7,6 +7,12 @@ import { conv, usage, agent, type Turn } from '../agent/state.ts';
 import { onThink, toolProgress, parseArgs, thinkTags } from '../agent/stream.ts';
 import { post, sse, authHeaders, base } from './http.ts';
 
+// OmniRoute (self-hosted gateway): known by its port or name, or by x-omniroute-* response headers
+const omni = new Set<string>();
+const isOmni = (p: Prov) => /omniroute|:20128\b/i.test(p.url) || omni.has(p.url);
+// the first set of reasoning options a provider+model accepted (index into the tries below)
+const accepted = new Map<string, number>();
+
 export async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
   const msgs: any[] = [{ role: 'system', content: conv.system }];
   for (const m of conv.history) {
@@ -28,15 +34,22 @@ export async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
   if (/generativelanguage\.googleapis/.test(p.url)) extra.extra_body = { google: { thinking_config: { include_thoughts: true } } };
   if (/openrouter\.ai/.test(p.url)) extra.reasoning = effort ? { effort } : { enabled: true };
   else if (effort) extra.reasoning_effort = effort;
+  if (isOmni(p)) {
+    // Claude behind OmniRoute: readable (summarized) thinking instead of redacted, and thinking
+    // on even with effort auto; Gemini behind it gets includeThoughts from OmniRoute itself
+    extra._omnirouteCopilotReasoningSummary = 'summarized';
+    if (!effort) extra.thinking = { type: 'adaptive' };
+  }
   // a server that rejects the reasoning options gets the request with fewer of them, then none
-  const tries = [extra];
-  if (extra.extra_body && extra.reasoning_effort) tries.push({ extra_body: extra.extra_body });
-  if (Object.keys(extra).length) tries.push({});
+  const { thinking, reasoning_effort, ...rest } = extra;
+  const tries = [extra, rest, {}].filter((x, i, a) => i === 0 || Object.keys(x).length < Object.keys(a[i - 1]).length);
+  const key = `${p.url} ${cfg.model}`;
   let res!: Response;
-  for (const [n, x] of tries.entries()) {
-    try { res = await post(`${base(p)}/chat/completions`, authHeaders(p), { ...body, ...x }, sig); break; }
+  for (let n = Math.min(accepted.get(key) ?? 0, tries.length - 1); ; n++) {
+    try { res = await post(`${base(p)}/chat/completions`, authHeaders(p), { ...body, ...tries[n] }, sig); accepted.set(key, n); break; }
     catch (e: any) { if (sig.aborted || n === tries.length - 1 || !/^4\d\d/.test(e.message)) throw e; }
   }
+  if ([...res.headers.keys()].some((k) => k.startsWith('x-omniroute'))) omni.add(p.url);
   const tags = thinkTags();
   const slots: { id: string; name: string; args: string; extra?: any }[] = [];
   for await (const ch of sse(res)) {

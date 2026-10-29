@@ -12,7 +12,7 @@ import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 // ─── version.ts ────────────────────────────────────────────────────────────
-const VERSION = '0.4.1';
+const VERSION = '0.4.2';
 const REPO = 'gl1ch5/fast-agent';
 const BRANCH = 'main';
 
@@ -2032,9 +2032,10 @@ function thinkTags() {
     buf += s; let text = '';
     for (;;) {
       if (!inside) {
-        const m = shown ? null : /<(think|thinking|thought)>/.exec(buf);
-        if (m && !buf.slice(0, m.index).trim()) { buf = buf.slice(m.index + m[0].length); inside = true; continue; }
-        const k = shown ? 0 : tail(OPEN);
+        const m = shown ? null : /<(\/?)(think|thinking|thought)>/.exec(buf);
+        // a lone </think> before the answer: a gateway's end-of-reasoning marker (older OmniRoute)
+        if (m && !buf.slice(0, m.index).trim()) { buf = buf.slice(m.index + m[0].length); inside = !m[1]; continue; }
+        const k = shown ? 0 : tail([...OPEN, ...CLOSE]);
         text += emit(buf.slice(0, buf.length - k)); buf = buf.slice(buf.length - k); return text;
       }
       const m = /<\/(think|thinking|thought)>/.exec(buf);
@@ -2423,6 +2424,12 @@ async function callAnthropic(p: Prov, sig: AbortSignal, acc: Turn) {
 // Reasoning arrives as reasoning_content / reasoning / reasoning_details, or inside the text as
 // <think>…</think> or Gemini's <thought>…</thought>; all of it is shown as thinking.
 
+// OmniRoute (self-hosted gateway): known by its port or name, or by x-omniroute-* response headers
+const omni = new Set<string>();
+const isOmni = (p: Prov) => /omniroute|:20128\b/i.test(p.url) || omni.has(p.url);
+// the first set of reasoning options a provider+model accepted (index into the tries below)
+const accepted = new Map<string, number>();
+
 async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
   const msgs: any[] = [{ role: 'system', content: conv.system }];
   for (const m of conv.history) {
@@ -2444,15 +2451,22 @@ async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
   if (/generativelanguage\.googleapis/.test(p.url)) extra.extra_body = { google: { thinking_config: { include_thoughts: true } } };
   if (/openrouter\.ai/.test(p.url)) extra.reasoning = effort ? { effort } : { enabled: true };
   else if (effort) extra.reasoning_effort = effort;
+  if (isOmni(p)) {
+    // Claude behind OmniRoute: readable (summarized) thinking instead of redacted, and thinking
+    // on even with effort auto; Gemini behind it gets includeThoughts from OmniRoute itself
+    extra._omnirouteCopilotReasoningSummary = 'summarized';
+    if (!effort) extra.thinking = { type: 'adaptive' };
+  }
   // a server that rejects the reasoning options gets the request with fewer of them, then none
-  const tries = [extra];
-  if (extra.extra_body && extra.reasoning_effort) tries.push({ extra_body: extra.extra_body });
-  if (Object.keys(extra).length) tries.push({});
+  const { thinking, reasoning_effort, ...rest } = extra;
+  const tries = [extra, rest, {}].filter((x, i, a) => i === 0 || Object.keys(x).length < Object.keys(a[i - 1]).length);
+  const key = `${p.url} ${cfg.model}`;
   let res!: Response;
-  for (const [n, x] of tries.entries()) {
-    try { res = await post(`${base(p)}/chat/completions`, authHeaders(p), { ...body, ...x }, sig); break; }
+  for (let n = Math.min(accepted.get(key) ?? 0, tries.length - 1); ; n++) {
+    try { res = await post(`${base(p)}/chat/completions`, authHeaders(p), { ...body, ...tries[n] }, sig); accepted.set(key, n); break; }
     catch (e: any) { if (sig.aborted || n === tries.length - 1 || !/^4\d\d/.test(e.message)) throw e; }
   }
+  if ([...res.headers.keys()].some((k) => k.startsWith('x-omniroute'))) omni.add(p.url);
   const tags = thinkTags();
   const slots: { id: string; name: string; args: string; extra?: any }[] = [];
   for await (const ch of sse(res)) {

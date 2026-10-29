@@ -60,9 +60,10 @@ export function thinkTags() {
     buf += s; let text = '';
     for (;;) {
       if (!inside) {
-        const m = shown ? null : /<(think|thinking|thought)>/.exec(buf);
-        if (m && !buf.slice(0, m.index).trim()) { buf = buf.slice(m.index + m[0].length); inside = true; continue; }
-        const k = shown ? 0 : tail(OPEN);
+        const m = shown ? null : /<(\/?)(think|thinking|thought)>/.exec(buf);
+        // a lone </think> before the answer: a gateway's end-of-reasoning marker (older OmniRoute)
+        if (m && !buf.slice(0, m.index).trim()) { buf = buf.slice(m.index + m[0].length); inside = !m[1]; continue; }
+        const k = shown ? 0 : tail([...OPEN, ...CLOSE]);
         text += emit(buf.slice(0, buf.length - k)); buf = buf.slice(buf.length - k); return text;
       }
       const m = /<\/(think|thinking|thought)>/.exec(buf);
