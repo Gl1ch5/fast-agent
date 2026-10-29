@@ -45,7 +45,7 @@ export function wrapLog(W: number): string[] {
   return all;
 }
 
-const STAR = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
+const STAR = ['·', '✢', '✶', '✻', '✽', '✻', '✶', '✢'];   // no ✳: Windows draws it as a green emoji
 
 // running tool cards, shown right after the transcript
 function cardBlock(W: number): string[] {

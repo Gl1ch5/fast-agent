@@ -11,7 +11,7 @@ import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 // ─── version.ts ────────────────────────────────────────────────────────────
-const VERSION = '0.2.6';
+const VERSION = '0.2.7';
 const REPO = 'gl1ch5/fast-agent';
 const BRANCH = 'main';
 
@@ -1316,6 +1316,8 @@ const short = (p: string) => clip(p.replace(/^\.\//, ''), 40);
 const quoted = (s: string) => dim(`"${clip(s.split('\n')[0], 40)}"`);
 const host = (u: string) => { try { const x = new URL(u); return clip(x.host + (x.pathname === '/' ? '' : x.pathname), 50); } catch { return clip(u, 50); } };
 const WRAPPERS = new Set(['sudo', 'time', 'nohup', 'env', 'command', 'exec', 'nice']);
+// pipe stages that only trim or format output — not worth showing
+const NOISE = new Set(['head', 'tail', 'Select-Object', 'select', 'Out-String', 'Out-Null', 'Format-Table', 'ft', 'Format-List', 'fl', 'sort', 'Sort-Object', 'uniq', 'more', 'less', 'cat', 'tee', 'wc']);
 const BODY = new Set(['do', 'then', 'else', '{', '(']);     // prefixes in front of a real command
 const CLOSE = new Set(['done', 'fi', 'esac', '}', ')']);    // block ends: nothing to show
 
@@ -1355,7 +1357,7 @@ function segLabel(words: string[], out: string, heredoc: boolean): string | null
       if (/^(i|install|add|ci)$/.test(sub)) return `${P} install${pos.length > 1 ? ' ' + list(pos.slice(1), 4) : ''}`;
       if (sub === 'run' || sub === 'run-script') return `${P} run ${pos[1] ?? ''}`;
       if (sub === 'pip' && pos[1] === 'install') return `${P} pip install ${list(pos.slice(2), 4)}`;
-      return `${P} ${list(pos, 2)}${to}`;
+      return `${P} ${pos.length ? list(pos, 3) : a.slice(0, 2).join(' ')}${to}`;
     }
     case 'npx': case 'bunx': case 'pnpx': return `${P} ${list(pos, 2)}`;
     case 'curl': case 'wget': case 'Invoke-WebRequest': case 'iwr': {
@@ -1389,11 +1391,11 @@ function segLabel(words: string[], out: string, heredoc: boolean): string | null
     case 'python': case 'python3': case 'py': case 'node': case 'deno': case 'ruby': case 'perl': case 'php': {
       if (a[0] === '-c' || a[0] === '-e') return `${P} ${gray('-c')} ${quoted(a[1] ?? '')}`;
       if (a[0] === '-m') return `${P} -m ${list(a.slice(1), 3)}`;
-      return `${P} ${list(pos, 3)}${to}`;
+      return `${P}${pos.length ? ' ' + list(pos, 3) : a.length ? ' ' + a.slice(0, 2).join(' ') : ''}${to}`;
     }
     case 'cd': case 'pushd': case 'Set-Location': return null;
     case 'true': case ':': return null;
-    default: return `${P}${pos.length ? ' ' + list(pos, 3) : ''}${to}`;
+    default: return `${P}${pos.length ? ' ' + list(pos, 3) : a.length ? ' ' + a.slice(0, 2).join(' ') : ''}${to}`;
   }
 }
 
@@ -1407,7 +1409,7 @@ function shellLabel(cmd: string): string {
   const flush = (op: string) => {
     if (seg.length || out) {
       if ((seg[0] === 'cd' || seg[0] === 'pushd' || seg[0] === 'Set-Location') && !parts.length) cdDir = seg[1] ?? '~';
-      else {
+      else if (!(joiner === ' | ' && parts.length && NOISE.has((seg[0] ?? '').split(/[\\/]/).pop()!) && !out)) {
         const l = segLabel(seg, out, hd);
         if (l) parts.push((parts.length ? gray(joiner) : '') + l);
       }
@@ -1516,7 +1518,7 @@ function wrapLog(W: number): string[] {
   return all;
 }
 
-const STAR = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
+const STAR = ['·', '✢', '✶', '✻', '✽', '✻', '✶', '✢'];   // no ✳: Windows draws it as a green emoji
 
 // running tool cards, shown right after the transcript
 function cardBlock(W: number): string[] {
@@ -1662,7 +1664,7 @@ function endLine() {
 function line(s = '', o: RowOpts = {}) {
   if (!ui.tui) { spin.stop(); if (!atBOL) w('\n'); w((o.mark ?? '') + s + '\n'); atBOL = true; return; }
   endLine();
-  for (const p of s.split('\n')) log.push({ ...o, s: p });
+  s.split('\n').forEach((p, i) => log.push({ ...o, s: p, mark: i ? undefined : o.mark }));
   req();
 }
 
@@ -2108,7 +2110,7 @@ for (;;) {
   if (hist[hist.length - 1] !== input) hist.push(input);
   const isCmd = /^\/\S/.test(input.trim()) && !input.includes('\n');
   gap();
-  line(isCmd ? gray(input) : input, { mark: accent('› '), ind: 2, kind: 'user' });
+  line(isCmd ? gray(input) : input.trim(), { mark: accent('› '), ind: 2, kind: 'user' });
   if (isCmd) { if (!(await command(input))) break; continue; }
   await runTurn(input);
 }

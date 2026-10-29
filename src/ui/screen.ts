@@ -47,7 +47,7 @@ export function endLine() {
 export function line(s = '', o: RowOpts = {}) {
   if (!ui.tui) { spin.stop(); if (!atBOL) w('\n'); w((o.mark ?? '') + s + '\n'); atBOL = true; return; }
   endLine();
-  for (const p of s.split('\n')) log.push({ ...o, s: p });
+  s.split('\n').forEach((p, i) => log.push({ ...o, s: p, mark: i ? undefined : o.mark }));
   req();
 }
 

@@ -44,7 +44,7 @@ for (;;) {
   if (hist[hist.length - 1] !== input) hist.push(input);
   const isCmd = /^\/\S/.test(input.trim()) && !input.includes('\n');
   gap();
-  line(isCmd ? gray(input) : input, { mark: accent('› '), ind: 2, kind: 'user' });
+  line(isCmd ? gray(input) : input.trim(), { mark: accent('› '), ind: 2, kind: 'user' });
   if (isCmd) { if (!(await command(input))) break; continue; }
   await runTurn(input);
 }
