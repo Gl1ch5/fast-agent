@@ -86,6 +86,16 @@ curl -fsSL https://raw.githubusercontent.com/gl1ch5/fast-agent/HEAD/install.sh |
 
 Без установки: `node fa.ts`. Обновление: запусти ту же команду ещё раз.
 
+Поставить версию из другой ветки (например, ещё не влитого PR):
+
+```powershell
+$env:FA_REF='имя-ветки'; irm https://raw.githubusercontent.com/gl1ch5/fast-agent/имя-ветки/install.ps1 | iex
+```
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gl1ch5/fast-agent/имя-ветки/install.sh | FA_REF=имя-ветки sh
+```
+
 ## Быстрый старт
 
 ```bash

@@ -1,6 +1,8 @@
 # fa installer for Windows:
 #   irm https://raw.githubusercontent.com/gl1ch5/fast-agent/HEAD/install.ps1 | iex
-$repo = 'https://raw.githubusercontent.com/gl1ch5/fast-agent/HEAD'
+# another branch / tag: $env:FA_REF='branch-name'; irm .../<branch-name>/install.ps1 | iex
+$ref = if ($env:FA_REF) { $env:FA_REF } else { 'HEAD' }
+$repo = "https://raw.githubusercontent.com/gl1ch5/fast-agent/$ref"
 $dir = if ($env:FA_BIN) { $env:FA_BIN } else { Join-Path $env:USERPROFILE '.fa\bin' }
 
 function Test-Node {
@@ -11,9 +13,9 @@ function Test-Node {
 }
 
 New-Item -ItemType Directory -Force $dir | Out-Null
-Write-Host "> downloading fa.ts -> $dir" -ForegroundColor Cyan
+Write-Host "> downloading fa.ts ($ref) -> $dir" -ForegroundColor Cyan
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-Invoke-WebRequest "$repo/fa.ts" -OutFile "$dir\fa.ts" -UseBasicParsing
+Invoke-WebRequest "$repo/fa.ts?t=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" -Headers @{ 'Cache-Control' = 'no-cache' } -OutFile "$dir\fa.ts" -UseBasicParsing
 Set-Content "$dir\fa.cmd" '@node "%~dp0fa.ts" %*' -Encoding ASCII
 
 if (-not (Test-Node)) {
@@ -34,4 +36,5 @@ if (($userPath -split ';') -notcontains $dir) {
 }
 if (($env:Path -split ';') -notcontains $dir) { $env:Path += ";$dir" }
 
-Write-Host '> done. run: fa' -ForegroundColor Green
+$ver = try { & node "$dir\fa.ts" --version } catch { '' }
+Write-Host "> done: fa $ver. run: fa" -ForegroundColor Green

@@ -1,16 +1,18 @@
 #!/bin/sh
 # fa installer for Linux / macOS:
 #   curl -fsSL https://raw.githubusercontent.com/gl1ch5/fast-agent/HEAD/install.sh | sh
+#   another branch / tag: curl -fsSL .../<branch>/install.sh | FA_REF=<branch> sh
 set -e
 
-REPO="https://raw.githubusercontent.com/gl1ch5/fast-agent/HEAD"
+REF="${FA_REF:-HEAD}"
+REPO="https://raw.githubusercontent.com/gl1ch5/fast-agent/$REF"
 DIR="${FA_BIN:-$HOME/.fa/bin}"
 
 say() { printf '\033[36m>\033[0m %s\n' "$1"; }
 warn() { printf '\033[33m!\033[0m %s\n' "$1"; }
 
 dl() {
-  if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
+  if command -v curl >/dev/null 2>&1; then curl -fsSL -H 'Cache-Control: no-cache' "$1" -o "$2"
   elif command -v wget >/dev/null 2>&1; then wget -qO "$2" "$1"
   else echo "curl or wget is required" >&2; exit 1; fi
 }
@@ -21,8 +23,8 @@ node_ok() {
 }
 
 mkdir -p "$DIR"
-say "downloading fa.ts -> $DIR"
-dl "$REPO/fa.ts" "$DIR/fa.ts.tmp"
+say "downloading fa.ts ($REF) -> $DIR"
+dl "$REPO/fa.ts?t=$(date +%s)" "$DIR/fa.ts.tmp"
 mv "$DIR/fa.ts.tmp" "$DIR/fa.ts"
 
 cat > "$DIR/fa" <<EOF
@@ -54,4 +56,5 @@ case ":$PATH:" in
     ;;
 esac
 
-say "done. run: fa"
+VER="$(node "$DIR/fa.ts" --version 2>/dev/null || true)"
+say "done: fa $VER. run: fa"
