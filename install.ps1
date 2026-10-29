@@ -5,7 +5,6 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $ref = if ($env:FA_REF) { $env:FA_REF } else { 'main' }
-$repo = "https://raw.githubusercontent.com/gl1ch5/fast-agent/$ref"
 $dir = if ($env:FA_BIN) { $env:FA_BIN } else { Join-Path $env:USERPROFILE '.fa\bin' }
 $prevEnc = [Console]::OutputEncoding
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
@@ -54,10 +53,18 @@ $old = Get-FaVersion "$dir\fa.ts"
 if ($old) { Show-Row '●' 'DarkGray' 'installed' "fa $old" }
 
 # download with a spinner
+# a branch URL on raw.githubusercontent.com is cached for minutes; download the branch's current commit instead
+$src = $ref
+try {
+  $refs = (Invoke-WebRequest "https://github.com/gl1ch5/fast-agent.git/info/refs?service=git-upload-pack" -UseBasicParsing -TimeoutSec 10).Content
+  if ($refs -is [byte[]]) { $refs = [Text.Encoding]::ASCII.GetString($refs) }
+  $m = [regex]::Match($refs, "([0-9a-f]{40}) refs/heads/$([regex]::Escape($ref))\b")
+  if ($m.Success) { $src = $m.Groups[1].Value }
+} catch {}
 $tmp = "$dir\fa.ts.tmp"
 $wc = New-Object Net.WebClient
 $wc.Headers.Add('Cache-Control', 'no-cache')
-$task = $wc.DownloadFileTaskAsync("$repo/fa.ts?t=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())", $tmp)
+$task = $wc.DownloadFileTaskAsync("https://raw.githubusercontent.com/gl1ch5/fast-agent/$src/fa.ts", $tmp)
 $frames = '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'
 $n = 0
 while (-not $task.IsCompleted) {

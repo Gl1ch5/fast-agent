@@ -1,2 +1,3 @@
-export const VERSION = '0.2.1';
-export const REPO_RAW = 'https://raw.githubusercontent.com/gl1ch5/fast-agent/main';
+export const VERSION = '0.2.2';
+export const REPO = 'gl1ch5/fast-agent';
+export const BRANCH = 'main';

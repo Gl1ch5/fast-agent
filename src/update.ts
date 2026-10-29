@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { VERSION, REPO_RAW } from './version.ts';
+import { VERSION, REPO, BRANCH } from './version.ts';
 import { ROOT } from './env.ts';
 import { cfg, saveCfg } from './config.ts';
 import { bold, gray, green, red, yellow } from './ui/ansi.ts';
@@ -13,8 +13,18 @@ import { cmpVer } from './util.ts';
 
 const selfPath = () => fileURLToPath(import.meta.url);
 
+// raw.githubusercontent.com caches a branch URL for minutes per edge, so resolve the
+// branch to its current commit (git's ref list is never cached) and download that
+async function latestCommit(timeout: number): Promise<string> {
+  try {
+    const res = await fetch(`https://github.com/${REPO}.git/info/refs?service=git-upload-pack`, { signal: AbortSignal.timeout(timeout) });
+    return new RegExp(`([0-9a-f]{40}) refs/heads/${BRANCH}\\b`).exec(await res.text())?.[1] || BRANCH;
+  } catch { return BRANCH; }
+}
+
 async function fetchLatest(timeout: number) {
-  const res = await fetch(`${REPO_RAW}/fa.ts`, { signal: AbortSignal.timeout(timeout), headers: { 'cache-control': 'no-cache' } });
+  const ref = await latestCommit(timeout);
+  const res = await fetch(`https://raw.githubusercontent.com/${REPO}/${ref}/fa.ts`, { signal: AbortSignal.timeout(timeout), headers: { 'cache-control': 'no-cache' } });
   if (!res.ok) throw new Error(`download failed: ${res.status}`);
   const src = await res.text();
   const v = /const VERSION = '([^']+)'/.exec(src)?.[1];

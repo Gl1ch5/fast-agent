@@ -11,8 +11,9 @@ import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 // ─── version.ts ────────────────────────────────────────────────────────────
-const VERSION = '0.2.1';
-const REPO_RAW = 'https://raw.githubusercontent.com/gl1ch5/fast-agent/main';
+const VERSION = '0.2.2';
+const REPO = 'gl1ch5/fast-agent';
+const BRANCH = 'main';
 
 // ─── env.ts ────────────────────────────────────────────────────────────────
 // Process environment: platform flags, CLI arguments, working directory.
@@ -948,8 +949,18 @@ function leaveTui(dump = true) {
 
 const selfPath = () => fileURLToPath(import.meta.url);
 
+// raw.githubusercontent.com caches a branch URL for minutes per edge, so resolve the
+// branch to its current commit (git's ref list is never cached) and download that
+async function latestCommit(timeout: number): Promise<string> {
+  try {
+    const res = await fetch(`https://github.com/${REPO}.git/info/refs?service=git-upload-pack`, { signal: AbortSignal.timeout(timeout) });
+    return new RegExp(`([0-9a-f]{40}) refs/heads/${BRANCH}\\b`).exec(await res.text())?.[1] || BRANCH;
+  } catch { return BRANCH; }
+}
+
 async function fetchLatest(timeout: number) {
-  const res = await fetch(`${REPO_RAW}/fa.ts`, { signal: AbortSignal.timeout(timeout), headers: { 'cache-control': 'no-cache' } });
+  const ref = await latestCommit(timeout);
+  const res = await fetch(`https://raw.githubusercontent.com/${REPO}/${ref}/fa.ts`, { signal: AbortSignal.timeout(timeout), headers: { 'cache-control': 'no-cache' } });
   if (!res.ok) throw new Error(`download failed: ${res.status}`);
   const src = await res.text();
   const v = /const VERSION = '([^']+)'/.exec(src)?.[1];

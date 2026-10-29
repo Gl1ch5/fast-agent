@@ -5,7 +5,6 @@
 set -e
 
 REF="${FA_REF:-main}"
-REPO="https://raw.githubusercontent.com/gl1ch5/fast-agent/$REF"
 DIR="${FA_BIN:-$HOME/.fa/bin}"
 
 # ─── look ────────────────────────────────────────────────────────────────────
@@ -70,8 +69,14 @@ mkdir -p "$DIR"
 OLD="$(ver_of "$DIR/fa.ts")"
 [ -n "$OLD" ] && row "${G}●${R}" "installed" "fa $OLD"
 
+# a branch URL on raw.githubusercontent.com is cached for minutes; download the branch's current commit instead
+SRC="$REF"
+if command -v curl >/dev/null 2>&1; then
+  SHA="$(curl -fsSL "https://github.com/gl1ch5/fast-agent.git/info/refs?service=git-upload-pack" 2>/dev/null | grep -ao "[0-9a-f]\{40\} refs/heads/$REF\$" | cut -c1-40 | head -n 1 || true)"
+  [ -n "$SHA" ] && SRC="$SHA"
+fi
 TMP="$DIR/fa.ts.tmp"
-spin "downloading fa ${D}($REF)${R}" dl "$REPO/fa.ts?t=$(date +%s)" "$TMP" || { rm -f "$TMP"; fail "download" "failed — check your connection (needs curl or wget)"; }
+spin "downloading fa ${D}($REF)${R}" dl "https://raw.githubusercontent.com/gl1ch5/fast-agent/$SRC/fa.ts" "$TMP" || { rm -f "$TMP"; fail "download" "failed — check your connection (needs curl or wget)"; }
 NEW="$(ver_of "$TMP")"
 [ -n "$NEW" ] || { rm -f "$TMP"; fail "download" "the file does not look like fa"; }
 SIZE="$(wc -c < "$TMP" | tr -d ' ')"
