@@ -1,5 +1,6 @@
 // End-to-end check of print mode against a fake OpenAI-compatible server:
-// write → edit with wrong indentation (fuzzy match) → shell → answer, then `-c` continues it.
+// write → edit with wrong indentation (fuzzy match) → shell → answer with <thought> reasoning
+// split across chunks, then `-c` continues it.
 //   node tests/smoke.ts            (tests fa.ts; FA_ENTRY=src/main.ts tests the sources)
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -31,9 +32,9 @@ const server = http.createServer((req, res) => {
     else if (tools === 0) step = call('write', { path: 'app.js', content: 'function add(a, b) {\n  return a - b;\n}\nconsole.log(add(2, 3));\n' });
     else if (tools === 1) step = call('edit', { path: 'app.js', edits: [{ old: '    return a - b;', new: '    return a + b;' }] });
     else if (tools === 2) step = call('shell', { command: 'node app.js' });
-    else step = text(`done: ${msgs[msgs.length - 1].content.trim().split('\n').pop()}`);
+    else step = ['<tho', 'ught>checking the out', 'put</thou', `ght>\n\ndone: ${msgs[msgs.length - 1].content.trim().split('\n').pop()}`].map(text);
     res.writeHead(200, { 'content-type': 'text/event-stream' });
-    res.write(`data: ${JSON.stringify(step)}\n\n`);
+    for (const s of [step].flat()) res.write(`data: ${JSON.stringify(s)}\n\n`);
     res.write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 1000, completion_tokens: 10 } })}\n\n`);
     res.end('data: [DONE]\n\n');
   });
@@ -66,6 +67,8 @@ try {
   assert.match(b.out, /continued/, b.out);
   const last = seen[seen.length - 1].messages.filter((m: any) => m.role === 'user').map((m: any) => m.content);
   assert.deepEqual(last, ['make add() in app.js correct', 'and now?']);
+  const said = seen[seen.length - 1].messages.filter((m: any) => m.role === 'assistant' && m.content).map((m: any) => m.content);
+  assert.deepEqual(said, ['done: 5'], 'reasoning is not part of the answer');
   console.log('smoke ok');
 } finally {
   server.close();

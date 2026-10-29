@@ -1,12 +1,13 @@
 // Full-screen frame: transcript, live status/cards, input box (or a modal),
 // command suggestions and the footer. Only changed rows are rewritten.
 import { w } from '../env.ts';
-import { accent, bold, code, gray, italic, yellow, fit, pad, vw, wrapAnsi, boxed, shimmer, border, borderHi } from './ansi.ts';
+import { accent, bold, code, gray, yellow, fit, pad, vw, wrapAnsi, boxed, shimmer, border, borderHi } from './ansi.ts';
 import { log, ui, spin } from './screen.ts';
 import { M } from './modal.ts';
 import { editor, queue, suggestions, inputView } from './input.ts';
 import { cards, cardRows } from './cards.ts';
 import { draftRows } from './draft.ts';
+import { thinkRows } from '../agent/stream.ts';
 import { agent, usage } from '../agent/state.ts';
 import { cfg, modelLabel } from '../config.ts';
 import { VERSION } from '../version.ts';
@@ -78,8 +79,7 @@ function statusRows(W: number): string[] {
     st += gray(` (${secs}s · ↓ ${kt(Math.round(agent.chars / 4))} tokens${tps >= 1 ? ` · ${Math.round(tps)} tok/s` : ''} · esc to interrupt)`);
   }
   rows.push(fit(st, W));
-  const last = agent.thinking ? agent.thinkBuf.trim().split('\n').pop() || '' : '';
-  rows.push(last ? fit(gray(italic('  ' + last)), W) : '');
+  rows.push('');
   return rows;
 }
 
@@ -137,7 +137,7 @@ export function render() {
     if (sug.length) bottom.push(...sugRows(sug, W));
   }
   const vh = Math.max(0, H - 1 - bottom.length);
-  const all = m?.full ? [] : [...wrapLog(W), ...cardBlock(W), ...draftRows(W)];
+  const all = m?.full ? [] : [...wrapLog(W), ...cardBlock(W), ...thinkRows(W), ...draftRows(W)];
   if (ui.scroll > 0 && all.length > lastTotal) ui.scroll += all.length - lastTotal;
   lastTotal = all.length;
   ui.scroll = Math.max(0, Math.min(ui.scroll, all.length - vh));

@@ -47,7 +47,7 @@ export async function command(input: string): Promise<boolean> {
       gap();
       for (const [c, d] of COMMANDS) line(`${pad(accent(c), 11)} ${d}`, { ind: 2 });
       line(gray('!command runs a shell command yourself · Esc stops the agent · Enter while it works queues a message · Ctrl+J or \\+Enter = new line'), { ind: 2 });
-      line(gray('↑↓ history · Tab completes a command · mouse wheel, PgUp/PgDn or Shift+↑↓ scroll · Shift+drag selects text · Ctrl+L redraw · Ctrl+C ×2 quit'), { ind: 2 });
+      line(gray('↑↓ history · Tab completes a command · mouse wheel, PgUp/PgDn or Shift+↑↓ scroll · Shift+drag selects text · Ctrl+O reasoning · Ctrl+L redraw · Ctrl+C ×2 quit'), { ind: 2 });
       break;
     case '/clear': case '/new':
       conv.history = []; conv.system = systemPrompt(); usage.in = usage.out = usage.cache = usage.last = 0; newSession();

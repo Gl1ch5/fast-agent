@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { safePath, relp, snapshot } from './sandbox.ts';
-import { green, red } from '../ui/ansi.ts';
+import { gray, green, red } from '../ui/ansi.ts';
 import type { Result } from './types.ts';
 
 // Where `old` is in `text`: exactly, else line by line ignoring trailing spaces, else ignoring
@@ -32,6 +32,18 @@ function locate(text: string, o: string, nw: string, i: number, file: string): {
   throw new Error(`edit #${i}: old text not found in ${file}. Read the file again and copy the text exactly. No changes applied.`);
 }
 
+// the changed lines of one replacement, numbered like the file
+function diffRows(o: string, n: string, at: number): string[] {
+  const a = o.split('\n'), b = n.split('\n');
+  let s = 0; while (s < a.length && s < b.length && a[s] === b[s]) s++;
+  let e = 0; while (e < a.length - s && e < b.length - s && a[a.length - 1 - e] === b[b.length - 1 - e]) e++;
+  const num = (k: number) => gray(String(at + s + k).padStart(4) + ' ');
+  return [
+    ...a.slice(s, a.length - e).map((l, k) => num(k) + red(`- ${l}`)),
+    ...b.slice(s, b.length - e).map((l, k) => num(k) + green(`+ ${l}`)),
+  ];
+}
+
 export function toolEdit(a: any): Result {
   const abs = safePath(a.path);
   if (!fs.existsSync(abs)) throw new Error(`${a.path} does not exist — use write to create it`);
@@ -40,14 +52,16 @@ export function toolEdit(a: any): Result {
   let text = crlf ? raw.replace(/\r\n/g, '\n') : raw;
   const edits = Array.isArray(a.edits) ? a.edits : [a];
   let plus = 0, minus = 0;
+  const preview: string[] = [];
   for (const [i, e] of edits.entries()) {
     const o = String(e.old ?? '').replace(/\r\n/g, '\n'), nw = String(e.new ?? '').replace(/\r\n/g, '\n');
     if (!o) throw new Error(`edit #${i + 1}: old is empty`);
     const m = locate(text, o, nw, i + 1, a.path);
+    preview.push(...diffRows(text.slice(m.at, m.at + m.len), m.nw, text.slice(0, m.at).split('\n').length));
     text = text.slice(0, m.at) + m.nw + text.slice(m.at + m.len);
     minus += o.split('\n').length; plus += nw.split('\n').length;
   }
   snapshot(abs);
   fs.writeFileSync(abs, crlf ? text.replace(/\n/g, '\r\n') : text);
-  return { text: `edited ${relp(abs)}`, show: `${green('+' + plus)} ${red('-' + minus)}` };
+  return { preview, text: `edited ${relp(abs)}`, show: `${green('+' + plus)} ${red('-' + minus)}` };
 }

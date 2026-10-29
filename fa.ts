@@ -12,7 +12,7 @@ import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 // ─── version.ts ────────────────────────────────────────────────────────────
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 const REPO = 'gl1ch5/fast-agent';
 const BRANCH = 'main';
 
@@ -544,7 +544,7 @@ const agent = {
   t0: 0, chars: 0,
   firstAt: 0,   // first streamed token of the current model call (for tok/s)
   mode: '' as 'text' | 'think' | '',
-  thinking: false, thinkBuf: '', thinkT0: 0,
+  thinking: false, thinkBuf: '', thinkAll: '', thinkT0: 0,
   draft: null as { name: string; raw: string } | null,   // tool call still being streamed
 };
 
@@ -618,13 +618,25 @@ function banner() {
 // ─── agent/context.ts ──────────────────────────────────────────────────────
 // Keeping the context small. Old tool output and the file contents the model already wrote
 // are replaced by short stubs once the conversation grows past cfg.compactAt input tokens
-// (or when the API says the prompt is too long). The newest tool results stay intact.
+// (300k by default) or past the model's real window, learned from its first "prompt is too long"
+// error. The newest tool results stay intact.
 
 const KEEP = 8;      // newest tool results that are never pruned
 const SMALL = 400;   // shorter texts are not worth a stub
 
-const compactAt = () => cfg.compactAt || 100_000;
+const ctxLimit = { model: '', max: 0 };   // window learned from an error, for this model
+const compactAt = () => {
+  const c = cfg.compactAt || 300_000;
+  return ctxLimit.max && ctxLimit.model === cfg.model ? Math.min(c, Math.round(ctxLimit.max * 0.8)) : c;
+};
 const tooLong = (msg: string) => /context|too long|too many tokens|maximum.*tokens|token limit|exceeds/i.test(msg);
+
+// remember the window from "maximum context length is 128000 tokens" / "215000 tokens > 200000 maximum"
+function learnLimit(msg: string, sent: number) {
+  const m = /context(?: length| window)?(?: is| of)? (\d{4,})/i.exec(msg) || /> ?(\d{4,}) maximum/i.exec(msg) || /maximum[^\d]{0,30}(\d{4,})/i.exec(msg);
+  const max = m ? Number(m[1]) : Math.round(sent * 0.9);
+  if (max > 0) { ctxLimit.max = ctxLimit.model === cfg.model && ctxLimit.max ? Math.min(ctxLimit.max, max) : max; ctxLimit.model = cfg.model; }
+}
 
 // returns how many characters were removed
 function prune(keep = KEEP): number {
@@ -692,8 +704,9 @@ function toolWrite(a: any): Result {
   snapshot(abs);
   fs.mkdirSync(path.dirname(abs), { recursive: true });
   fs.writeFileSync(abs, a.content);
-  const n = a.content.split('\n').length;
-  return { text: `wrote ${relp(abs)} (${n} lines)`, show: gray(`${existed ? 'rewrote' : 'created'} · ${n} lines · ${kb(Buffer.byteLength(a.content))}`) };
+  const ls = a.content.replace(/\n$/, '').split('\n'), n = a.content ? ls.length : 0;
+  const preview = ls.slice(0, n).map((l: string, i: number) => gray(`${String(i + 1).padStart(4)} │ ${l}`));
+  return { preview, text: `wrote ${relp(abs)} (${n} lines)`, show: gray(`${existed ? 'rewrote' : 'created'} · ${n} lines · ${kb(Buffer.byteLength(a.content))}`) };
 }
 
 // ─── tools/edit.ts ─────────────────────────────────────────────────────────
@@ -726,6 +739,18 @@ function locate(text: string, o: string, nw: string, i: number, file: string): {
   throw new Error(`edit #${i}: old text not found in ${file}. Read the file again and copy the text exactly. No changes applied.`);
 }
 
+// the changed lines of one replacement, numbered like the file
+function diffRows(o: string, n: string, at: number): string[] {
+  const a = o.split('\n'), b = n.split('\n');
+  let s = 0; while (s < a.length && s < b.length && a[s] === b[s]) s++;
+  let e = 0; while (e < a.length - s && e < b.length - s && a[a.length - 1 - e] === b[b.length - 1 - e]) e++;
+  const num = (k: number) => gray(String(at + s + k).padStart(4) + ' ');
+  return [
+    ...a.slice(s, a.length - e).map((l, k) => num(k) + red(`- ${l}`)),
+    ...b.slice(s, b.length - e).map((l, k) => num(k) + green(`+ ${l}`)),
+  ];
+}
+
 function toolEdit(a: any): Result {
   const abs = safePath(a.path);
   if (!fs.existsSync(abs)) throw new Error(`${a.path} does not exist — use write to create it`);
@@ -734,16 +759,18 @@ function toolEdit(a: any): Result {
   let text = crlf ? raw.replace(/\r\n/g, '\n') : raw;
   const edits = Array.isArray(a.edits) ? a.edits : [a];
   let plus = 0, minus = 0;
+  const preview: string[] = [];
   for (const [i, e] of edits.entries()) {
     const o = String(e.old ?? '').replace(/\r\n/g, '\n'), nw = String(e.new ?? '').replace(/\r\n/g, '\n');
     if (!o) throw new Error(`edit #${i + 1}: old is empty`);
     const m = locate(text, o, nw, i + 1, a.path);
+    preview.push(...diffRows(text.slice(m.at, m.at + m.len), m.nw, text.slice(0, m.at).split('\n').length));
     text = text.slice(0, m.at) + m.nw + text.slice(m.at + m.len);
     minus += o.split('\n').length; plus += nw.split('\n').length;
   }
   snapshot(abs);
   fs.writeFileSync(abs, crlf ? text.replace(/\n/g, '\r\n') : text);
-  return { text: `edited ${relp(abs)}`, show: `${green('+' + plus)} ${red('-' + minus)}` };
+  return { preview, text: `edited ${relp(abs)}`, show: `${green('+' + plus)} ${red('-' + minus)}` };
 }
 
 // ─── tools/read.ts ─────────────────────────────────────────────────────────
@@ -844,6 +871,11 @@ function finishCard(c: Card, r: Result) {
   }
   if (log[log.length - 1]?.kind !== 'tool') gap();
   const rows: Row[] = [{ s: `${c.title}${summary ? '  ' + summary : ''}${secs >= 1 ? gray(` · ${secs.toFixed(1)}s`) : ''}`, mark, ind: 2, kind: 'tool' }];
+  if (r.preview?.length && !r.err) {
+    const MAX = 8, pv = r.preview;
+    pv.slice(0, MAX).forEach((l, j) => rows.push({ s: l, ind: 5, mark: j === 0 ? gray('  ⎿  ') : undefined, kind: 'tool', clip: true }));
+    if (pv.length > MAX) rows.push({ s: gray(`… ${pv.length - MAX} more lines`), ind: 5, kind: 'tool', clip: true });
+  }
   const shown = tail.slice(-4);
   if (tail.length > 4) rows.push({ s: gray(`… ${tail.length - 4} more lines`), ind: 5, mark: gray('  ⎿  '), kind: 'tool', clip: true });
   shown.forEach((l, j) => rows.push({ s: r.err ? red(l) : gray(l), ind: 5, mark: j === 0 && tail.length <= 4 ? gray('  ⎿  ') : undefined, kind: 'tool', clip: true }));
@@ -1649,7 +1681,7 @@ async function command(input: string): Promise<boolean> {
       gap();
       for (const [c, d] of COMMANDS) line(`${pad(accent(c), 11)} ${d}`, { ind: 2 });
       line(gray('!command runs a shell command yourself · Esc stops the agent · Enter while it works queues a message · Ctrl+J or \\+Enter = new line'), { ind: 2 });
-      line(gray('↑↓ history · Tab completes a command · mouse wheel, PgUp/PgDn or Shift+↑↓ scroll · Shift+drag selects text · Ctrl+L redraw · Ctrl+C ×2 quit'), { ind: 2 });
+      line(gray('↑↓ history · Tab completes a command · mouse wheel, PgUp/PgDn or Shift+↑↓ scroll · Shift+drag selects text · Ctrl+O reasoning · Ctrl+L redraw · Ctrl+C ×2 quit'), { ind: 2 });
       break;
     case '/clear': case '/new':
       conv.history = []; conv.system = systemPrompt(); usage.in = usage.out = usage.cache = usage.last = 0; newSession();
@@ -1793,6 +1825,7 @@ const editor = {
     }
     if (k.ctrl && n === 'd' && !this.chars.length && !busy) return this.quit();
     if (k.ctrl && n === 'l') { resetFrame(); return req(); }
+    if (k.ctrl && n === 'o') { ui.thoughts = !ui.thoughts; for (const r of log) if (r.kind === 'think') r.wr = undefined; return note(ui.thoughts ? 'reasoning expanded · ctrl+o to collapse' : 'reasoning collapsed', 1500); }
     if (n === 'pageup' || n === 'pagedown' || (k.shift && (n === 'up' || n === 'down'))) {
       const step = n === 'pageup' || n === 'pagedown' ? Math.max(1, (process.stdout.rows || 24) - 8) : 3;
       ui.scroll = Math.max(0, ui.scroll + (n === 'pageup' || n === 'up' ? step : -step));
@@ -1941,6 +1974,106 @@ function draftRows(W: number): string[] {
 
 const withSpinner = (rows: string[]) => [`${accent2(FRAMES[ui.tick % FRAMES.length])} ${rows[0]}`, ...rows.slice(1)];
 
+// ─── agent/stream.ts ───────────────────────────────────────────────────────
+// Turning streamed model output into transcript rows and status updates.
+
+function onText(s: string) {
+  agent.chars += s.length; agent.firstAt ||= Date.now();
+  if (!ui.tui) { if (agent.mode === 'think') out('\n'); agent.mode = 'text'; out(s); return; }
+  if (agent.mode !== 'text') { endThink(); gap(); agent.mode = 'text'; }
+  out(s, { md: true, ind: 2, mark: accent('● '), kind: 'text' });
+}
+
+function onThink(s: string) {
+  agent.chars += s.length; agent.firstAt ||= Date.now();
+  if (!ui.tui) { if (agent.mode !== 'think') endLine(); agent.mode = 'think'; out(gray(s)); return; }
+  if (agent.mode !== 'think') {
+    if (agent.mode === 'text') endLine();
+    agent.mode = 'think'; agent.thinking = true; agent.thinkBuf = agent.thinkAll = ''; agent.thinkT0 = Date.now();
+    spin.text = 'Thinking';
+  }
+  agent.thinkBuf = (agent.thinkBuf + s).slice(-2000);
+  agent.thinkAll += s;
+  req();
+}
+
+// collapse the reasoning into one "Thought for Ns" line; Ctrl+O shows it in full
+function endThink() {
+  if (!agent.thinking) return;
+  agent.thinking = false;
+  const secs = Math.max(1, Math.round((Date.now() - agent.thinkT0) / 1000));
+  const text = agent.thinkAll.trim();
+  gap();
+  pushRows([{ s: '', kind: 'think', dyn: (W) => {
+    const head = `${gray('∴ ')}${gray(italic(`Thought for ${secs}s`))}${text && !ui.thoughts ? gray('  ctrl+o to expand') : ''}`;
+    if (!ui.thoughts || !text) return [head];
+    return [head, ...text.split('\n').flatMap((l) => wrapAnsi(l, W - 4)).map((l) => '    ' + gray(italic(l)))];
+  } }]);
+}
+
+// The live tail of the reasoning, under the transcript while the model thinks.
+function thinkRows(W: number): string[] {
+  if (!agent.thinking || !agent.thinkBuf.trim()) return [];
+  const ls = agent.thinkBuf.trim().split('\n').flatMap((l) => (l.trim() ? wrapAnsi(l, W - 4) : []));
+  return ['', ...ls.slice(-5).map((l) => '    ' + gray(italic(l)))];
+}
+
+// Reasoning that arrives inside the text — <think>…</think> (DeepSeek, Qwen, local servers),
+// <thought>…</thought> (Gemini) — goes to onThink. Tags count only before any visible text.
+function thinkTags() {
+  let buf = '', inside = false, shown = false;
+  const tail = (tags: string[]) => {   // keep a tag that may be cut in half at the end
+    for (let k = Math.min(buf.length, 11); k > 0; k--) if (tags.some((t) => t.startsWith(buf.slice(-k)))) return k;
+    return 0;
+  };
+  const OPEN = ['<think>', '<thinking>', '<thought>'], CLOSE = ['</think>', '</thinking>', '</thought>'];
+  const emit = (t: string) => { if (!shown) t = t.replace(/^\s+/, ''); if (t) { shown = true; onText(t); } return t; };
+  const feed = (s: string): string => {
+    buf += s; let text = '';
+    for (;;) {
+      if (!inside) {
+        const m = shown ? null : /<(think|thinking|thought)>/.exec(buf);
+        if (m && !buf.slice(0, m.index).trim()) { buf = buf.slice(m.index + m[0].length); inside = true; continue; }
+        const k = shown ? 0 : tail(OPEN);
+        text += emit(buf.slice(0, buf.length - k)); buf = buf.slice(buf.length - k); return text;
+      }
+      const m = /<\/(think|thinking|thought)>/.exec(buf);
+      if (m) { if (m.index) onThink(buf.slice(0, m.index)); buf = buf.slice(m.index + m[0].length); inside = false; continue; }
+      const k = tail(CLOSE);
+      if (buf.length > k) onThink(buf.slice(0, buf.length - k));
+      buf = buf.slice(buf.length - k); return text;
+    }
+  };
+  const flush = (): string => { const b = buf; buf = ''; if (inside) { if (b) onThink(b); return ''; } return emit(b); };
+  return { feed, flush };
+}
+
+function endStream() { endThink(); endLine(); agent.mode = ''; agent.draft = null; }
+
+const DOING: Record<string, string> = { write: 'Writing', edit: 'Editing', read: 'Reading', shell: 'Preparing' };
+
+// the model is streaming tool-call arguments
+function toolProgress(name: string, raw: string) {
+  agent.firstAt ||= Date.now();
+  const p = /"path"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(raw)?.[1] ?? /"command"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(raw)?.[1] ?? '';
+  if (agent.mode) { endThink(); endLine(); agent.mode = ''; }
+  if (ui.tui) { gap(); agent.draft = { name, raw }; spin.start(DOING[name] || name); return; }
+  const what = name === 'shell' ? '' : p.replace(/\\n/g, ' ');
+  spin.start(`${DOING[name] || name}${what ? ' ' + what : ''}  ${kb(raw.length)}`);
+}
+
+function parseArgs(name: string, raw: string, truncated: boolean): Pick<Call, 'args' | 'bad'> {
+  try { return { args: raw ? JSON.parse(raw) : {} }; }
+  catch {
+    return {
+      args: {},
+      bad: truncated
+        ? `the ${name} call was cut off by the output token limit — split the content: write a smaller file first, then add the rest with edit`
+        : `invalid JSON arguments for ${name}`,
+    };
+  }
+}
+
 // ─── ui/render.ts ──────────────────────────────────────────────────────────
 // Full-screen frame: transcript, live status/cards, input box (or a modal),
 // command suggestions and the footer. Only changed rows are rewritten.
@@ -2011,8 +2144,7 @@ function statusRows(W: number): string[] {
     st += gray(` (${secs}s · ↓ ${kt(Math.round(agent.chars / 4))} tokens${tps >= 1 ? ` · ${Math.round(tps)} tok/s` : ''} · esc to interrupt)`);
   }
   rows.push(fit(st, W));
-  const last = agent.thinking ? agent.thinkBuf.trim().split('\n').pop() || '' : '';
-  rows.push(last ? fit(gray(italic('  ' + last)), W) : '');
+  rows.push('');
   return rows;
 }
 
@@ -2070,7 +2202,7 @@ function render() {
     if (sug.length) bottom.push(...sugRows(sug, W));
   }
   const vh = Math.max(0, H - 1 - bottom.length);
-  const all = m?.full ? [] : [...wrapLog(W), ...cardBlock(W), ...draftRows(W)];
+  const all = m?.full ? [] : [...wrapLog(W), ...cardBlock(W), ...thinkRows(W), ...draftRows(W)];
   if (ui.scroll > 0 && all.length > lastTotal) ui.scroll += all.length - lastTotal;
   lastTotal = all.length;
   ui.scroll = Math.max(0, Math.min(ui.scroll, all.length - vh));
@@ -2102,7 +2234,7 @@ interface Row {
   wr?: string[]; ww?: number; wf?: boolean;
 }
 
-const ui = { tui: false, scroll: 0, tick: 0, note: '', noteUntil: 0 };
+const ui = { tui: false, scroll: 0, tick: 0, note: '', noteUntil: 0, thoughts: false };   // thoughts: Ctrl+O expands reasoning
 const log: Row[] = [];
 let open = false;   // TUI: the last row still receives streamed text
 let atBOL = true;   // print mode: cursor is at the beginning of a line
@@ -2192,63 +2324,6 @@ async function runShell(cmd: string) {
   conv.history.push({ role: 'user', text: `[I ran \`${cmd}\` myself]\n${r.text}` });
 }
 
-// ─── agent/stream.ts ───────────────────────────────────────────────────────
-// Turning streamed model output into transcript rows and status updates.
-
-function onText(s: string) {
-  agent.chars += s.length; agent.firstAt ||= Date.now();
-  if (!ui.tui) { if (agent.mode === 'think') out('\n'); agent.mode = 'text'; out(s); return; }
-  if (agent.mode !== 'text') { endThink(); gap(); agent.mode = 'text'; }
-  out(s, { md: true, ind: 2, mark: accent('● '), kind: 'text' });
-}
-
-function onThink(s: string) {
-  agent.chars += s.length; agent.firstAt ||= Date.now();
-  if (!ui.tui) { if (agent.mode !== 'think') endLine(); agent.mode = 'think'; out(gray(s)); return; }
-  if (agent.mode !== 'think') {
-    if (agent.mode === 'text') endLine();
-    agent.mode = 'think'; agent.thinking = true; agent.thinkBuf = ''; agent.thinkT0 = Date.now();
-    spin.text = 'Thinking';
-  }
-  agent.thinkBuf = (agent.thinkBuf + s).slice(-2000);
-  req();
-}
-
-// collapse the reasoning into one "Thought for Ns" line
-function endThink() {
-  if (!agent.thinking) return;
-  agent.thinking = false;
-  const secs = Math.max(1, Math.round((Date.now() - agent.thinkT0) / 1000));
-  gap();
-  line(gray(italic(`Thought for ${secs}s`)), { ind: 2, mark: gray('∴ '), kind: 'think' });
-}
-
-function endStream() { endThink(); endLine(); agent.mode = ''; agent.draft = null; }
-
-const DOING: Record<string, string> = { write: 'Writing', edit: 'Editing', read: 'Reading', shell: 'Preparing' };
-
-// the model is streaming tool-call arguments
-function toolProgress(name: string, raw: string) {
-  agent.firstAt ||= Date.now();
-  const p = /"path"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(raw)?.[1] ?? /"command"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(raw)?.[1] ?? '';
-  if (agent.mode) { endThink(); endLine(); agent.mode = ''; }
-  if (ui.tui) { gap(); agent.draft = { name, raw }; spin.start(DOING[name] || name); return; }
-  const what = name === 'shell' ? '' : p.replace(/\\n/g, ' ');
-  spin.start(`${DOING[name] || name}${what ? ' ' + what : ''}  ${kb(raw.length)}`);
-}
-
-function parseArgs(name: string, raw: string, truncated: boolean): Pick<Call, 'args' | 'bad'> {
-  try { return { args: raw ? JSON.parse(raw) : {} }; }
-  catch {
-    return {
-      args: {},
-      bad: truncated
-        ? `the ${name} call was cut off by the output token limit — split the content: write a smaller file first, then add the rest with edit`
-        : `invalid JSON arguments for ${name}`,
-    };
-  }
-}
-
 // ─── api/anthropic.ts ──────────────────────────────────────────────────────
 // Anthropic Messages API (streaming, prompt caching, adaptive thinking, fast mode).
 
@@ -2279,15 +2354,26 @@ async function callAnthropic(p: Prov, sig: AbortSignal, acc: Turn) {
     system: [{ type: 'text', text: conv.system, cache_control: { type: 'ephemeral' } }],
     tools: TOOLS.map((t) => ({ name: t.name, description: t.description, input_schema: t.schema, ...(official ? { eager_input_streaming: true } : {}) })),
   };
-  if (cfg.effort !== 'auto') { body.output_config = { effort: cfg.effort }; body.thinking = { type: 'adaptive', display: 'summarized' }; }
+  // adaptive thinking with readable summaries; with effort auto the model decides how much to think
+  body.thinking = { type: 'adaptive', display: 'summarized' };
+  if (cfg.effort !== 'auto') body.output_config = { effort: cfg.effort };
   const headers = authHeaders(p);
   if (cfg.fast && official) { body.speed = 'fast'; headers['anthropic-beta'] = 'fast-mode-2026-02-01'; }
 
-  let res: Response;
-  try { res = await post(`${base(p)}/v1/messages`, headers, body, sig); }
-  catch (e: any) {
-    if (!cfg.maxTokens && /max_tokens/.test(e.message)) { body.max_tokens = 8192; res = await post(`${base(p)}/v1/messages`, headers, body, sig); }
-    else throw e;
+  // older models and compatible servers: step down to what they accept
+  let res!: Response;
+  for (let n = 0; ; n++) {
+    try { res = await post(`${base(p)}/v1/messages`, headers, body, sig); break; }
+    catch (e: any) {
+      const m = String(e.message);
+      if (sig.aborted || n >= 6 || !/^4\d\d/.test(m)) throw e;
+      if (!cfg.maxTokens && /max_tokens/.test(m) && body.max_tokens > 8192) body.max_tokens = 8192;
+      else if (body.thinking?.display && /display/.test(m)) body.thinking = { type: 'adaptive' };
+      else if (body.thinking?.type === 'adaptive' && /adaptive/.test(m)) body.thinking = { type: 'enabled', budget_tokens: Math.min(16000, body.max_tokens - 1024) };
+      else if (body.output_config && /output_config|effort/.test(m)) delete body.output_config;
+      else if (body.thinking && /thinking|budget/.test(m)) delete body.thinking;
+      else throw e;
+    }
   }
   const blocks: any[] = []; const raw: Record<number, string> = {};
   for await (const ev of sse(res)) {
@@ -2334,6 +2420,8 @@ async function callAnthropic(p: Prov, sig: AbortSignal, acc: Turn) {
 
 // ─── api/openai.ts ─────────────────────────────────────────────────────────
 // OpenAI-compatible /chat/completions (streaming tool calls, reasoning text).
+// Reasoning arrives as reasoning_content / reasoning / reasoning_details, or inside the text as
+// <think>…</think> or Gemini's <thought>…</thought>; all of it is shown as thinking.
 
 async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
   const msgs: any[] = [{ role: 'system', content: conv.system }];
@@ -2342,7 +2430,7 @@ async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
     else if (m.role === 'tool') msgs.push({ role: 'tool', tool_call_id: m.id, content: m.text || '(no output)' });
     else msgs.push({
       role: 'assistant', content: m.text || (m.calls.length ? null : '(no response)'),
-      ...(m.calls.length ? { tool_calls: m.calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.args ?? {}) } })) } : {}),
+      ...(m.calls.length ? { tool_calls: m.calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.args ?? {}) }, ...(c.extra ? { extra_content: c.extra } : {}) })) } : {}),
     });
   }
   const body: any = {
@@ -2350,9 +2438,23 @@ async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
     tools: TOOLS.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.schema } })),
   };
   if (cfg.maxTokens) body.max_tokens = cfg.maxTokens;
-  if (cfg.effort !== 'auto') body.reasoning_effort = ['xhigh', 'max'].includes(cfg.effort) ? 'high' : cfg.effort;
-  const res = await post(`${base(p)}/chat/completions`, authHeaders(p), body, sig);
-  const slots: { id: string; name: string; args: string }[] = [];
+  const effort = cfg.effort === 'auto' ? '' : ['xhigh', 'max'].includes(cfg.effort) ? 'high' : cfg.effort;
+  // ask for the reasoning text where the provider hides it by default
+  const extra: any = {};
+  if (/generativelanguage\.googleapis/.test(p.url)) extra.extra_body = { google: { thinking_config: { include_thoughts: true } } };
+  if (/openrouter\.ai/.test(p.url)) extra.reasoning = effort ? { effort } : { enabled: true };
+  else if (effort) extra.reasoning_effort = effort;
+  // a server that rejects the reasoning options gets the request with fewer of them, then none
+  const tries = [extra];
+  if (extra.extra_body && extra.reasoning_effort) tries.push({ extra_body: extra.extra_body });
+  if (Object.keys(extra).length) tries.push({});
+  let res!: Response;
+  for (const [n, x] of tries.entries()) {
+    try { res = await post(`${base(p)}/chat/completions`, authHeaders(p), { ...body, ...x }, sig); break; }
+    catch (e: any) { if (sig.aborted || n === tries.length - 1 || !/^4\d\d/.test(e.message)) throw e; }
+  }
+  const tags = thinkTags();
+  const slots: { id: string; name: string; args: string; extra?: any }[] = [];
   for await (const ch of sse(res)) {
     if (ch.error) throw new Error(ch.error.message || JSON.stringify(ch.error));
     if (ch.usage) {
@@ -2362,12 +2464,16 @@ async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
     const choice = ch.choices?.[0];
     if (!choice) continue;
     const d = choice.delta || {};
-    const think = d.reasoning_content ?? d.reasoning;
+    let think = d.reasoning_content ?? d.reasoning;
+    if (typeof think !== 'string' && Array.isArray(d.reasoning_details)) think = d.reasoning_details.map((r: any) => r.text || r.summary || '').join('');
     if (typeof think === 'string' && think) onThink(think);
-    if (d.content) { acc.text += d.content; onText(d.content); }
+    if (typeof d.content === 'string' && d.content) acc.text += tags.feed(d.content);
     for (const tc of d.tool_calls || []) {
-      const i = typeof tc.index === 'number' ? tc.index : slots.length;
+      // no index, or every call at index 0 (Gemini): the same id continues a call, a new id starts one
+      const byId = () => (tc.id ? (slots.findIndex((x) => x?.id === tc.id) + 1 || slots.length + 1) - 1 : Math.max(0, slots.length - 1));
+      const i = typeof tc.index === 'number' && !(tc.id && slots[tc.index]?.id && slots[tc.index].id !== tc.id) ? tc.index : byId();
       const s = (slots[i] ||= { id: '', name: '', args: '' });
+      if (tc.extra_content) s.extra = tc.extra_content;
       if (tc.id) s.id = tc.id;
       if (tc.function?.name) s.name = tc.function.name;
       if (tc.function?.arguments) { s.args += tc.function.arguments; agent.chars += tc.function.arguments.length; }
@@ -2375,7 +2481,8 @@ async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
     }
     if (choice.finish_reason) acc.stop = choice.finish_reason;
   }
-  slots.filter(Boolean).forEach((s, i) => acc.calls.push({ id: s.id || `call_${Date.now()}_${i}`, name: s.name, ...parseArgs(s.name, s.args, acc.stop === 'length') }));
+  acc.text += tags.flush();
+  slots.filter(Boolean).forEach((s, i) => acc.calls.push({ id: s.id || `call_${Date.now()}_${i}`, name: s.name, ...parseArgs(s.name, s.args, acc.stop === 'length'), ...(s.extra ? { extra: s.extra } : {}) }));
 }
 
 // ─── agent/loop.ts ─────────────────────────────────────────────────────────
@@ -2410,7 +2517,7 @@ async function runTurn(text: string) {
         } catch (e: any) {
           endStream();
           // the prompt no longer fits: drop old tool output and try once more
-          if (!retried && !sig.aborted && !acc.text && !acc.calls.length && tooLong(String(e.message)) && prune(2) > 0) {
+          if (!retried && !sig.aborted && !acc.text && !acc.calls.length && tooLong(String(e.message)) && (learnLimit(String(e.message), usage.last), prune(2) > 0)) {
             retried = true; line(gray('context too long — old tool output removed, retrying'), { ind: 2, mark: gray('✂ ') }); continue;
           }
           if (acc.text) conv.history.push({ role: 'assistant', text: acc.text, calls: [] });

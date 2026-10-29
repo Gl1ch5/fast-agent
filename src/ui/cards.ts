@@ -53,6 +53,11 @@ export function finishCard(c: Card, r: Result) {
   }
   if (log[log.length - 1]?.kind !== 'tool') gap();
   const rows: Row[] = [{ s: `${c.title}${summary ? '  ' + summary : ''}${secs >= 1 ? gray(` · ${secs.toFixed(1)}s`) : ''}`, mark, ind: 2, kind: 'tool' }];
+  if (r.preview?.length && !r.err) {
+    const MAX = 8, pv = r.preview;
+    pv.slice(0, MAX).forEach((l, j) => rows.push({ s: l, ind: 5, mark: j === 0 ? gray('  ⎿  ') : undefined, kind: 'tool', clip: true }));
+    if (pv.length > MAX) rows.push({ s: gray(`… ${pv.length - MAX} more lines`), ind: 5, kind: 'tool', clip: true });
+  }
   const shown = tail.slice(-4);
   if (tail.length > 4) rows.push({ s: gray(`… ${tail.length - 4} more lines`), ind: 5, mark: gray('  ⎿  '), kind: 'tool', clip: true });
   shown.forEach((l, j) => rows.push({ s: r.err ? red(l) : gray(l), ind: 5, mark: j === 0 && tail.length <= 4 ? gray('  ⎿  ') : undefined, kind: 'tool', clip: true }));

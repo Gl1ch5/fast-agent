@@ -34,15 +34,26 @@ export async function callAnthropic(p: Prov, sig: AbortSignal, acc: Turn) {
     system: [{ type: 'text', text: conv.system, cache_control: { type: 'ephemeral' } }],
     tools: TOOLS.map((t) => ({ name: t.name, description: t.description, input_schema: t.schema, ...(official ? { eager_input_streaming: true } : {}) })),
   };
-  if (cfg.effort !== 'auto') { body.output_config = { effort: cfg.effort }; body.thinking = { type: 'adaptive', display: 'summarized' }; }
+  // adaptive thinking with readable summaries; with effort auto the model decides how much to think
+  body.thinking = { type: 'adaptive', display: 'summarized' };
+  if (cfg.effort !== 'auto') body.output_config = { effort: cfg.effort };
   const headers = authHeaders(p);
   if (cfg.fast && official) { body.speed = 'fast'; headers['anthropic-beta'] = 'fast-mode-2026-02-01'; }
 
-  let res: Response;
-  try { res = await post(`${base(p)}/v1/messages`, headers, body, sig); }
-  catch (e: any) {
-    if (!cfg.maxTokens && /max_tokens/.test(e.message)) { body.max_tokens = 8192; res = await post(`${base(p)}/v1/messages`, headers, body, sig); }
-    else throw e;
+  // older models and compatible servers: step down to what they accept
+  let res!: Response;
+  for (let n = 0; ; n++) {
+    try { res = await post(`${base(p)}/v1/messages`, headers, body, sig); break; }
+    catch (e: any) {
+      const m = String(e.message);
+      if (sig.aborted || n >= 6 || !/^4\d\d/.test(m)) throw e;
+      if (!cfg.maxTokens && /max_tokens/.test(m) && body.max_tokens > 8192) body.max_tokens = 8192;
+      else if (body.thinking?.display && /display/.test(m)) body.thinking = { type: 'adaptive' };
+      else if (body.thinking?.type === 'adaptive' && /adaptive/.test(m)) body.thinking = { type: 'enabled', budget_tokens: Math.min(16000, body.max_tokens - 1024) };
+      else if (body.output_config && /output_config|effort/.test(m)) delete body.output_config;
+      else if (body.thinking && /thinking|budget/.test(m)) delete body.thinking;
+      else throw e;
+    }
   }
   const blocks: any[] = []; const raw: Record<number, string> = {};
   for await (const ev of sse(res)) {

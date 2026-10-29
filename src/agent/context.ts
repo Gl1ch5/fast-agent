@@ -1,14 +1,26 @@
 // Keeping the context small. Old tool output and the file contents the model already wrote
 // are replaced by short stubs once the conversation grows past cfg.compactAt input tokens
-// (or when the API says the prompt is too long). The newest tool results stay intact.
+// (300k by default) or past the model's real window, learned from its first "prompt is too long"
+// error. The newest tool results stay intact.
 import { cfg } from '../config.ts';
 import { conv, usage } from './state.ts';
 
 const KEEP = 8;      // newest tool results that are never pruned
 const SMALL = 400;   // shorter texts are not worth a stub
 
-export const compactAt = () => cfg.compactAt || 100_000;
+export const ctxLimit = { model: '', max: 0 };   // window learned from an error, for this model
+export const compactAt = () => {
+  const c = cfg.compactAt || 300_000;
+  return ctxLimit.max && ctxLimit.model === cfg.model ? Math.min(c, Math.round(ctxLimit.max * 0.8)) : c;
+};
 export const tooLong = (msg: string) => /context|too long|too many tokens|maximum.*tokens|token limit|exceeds/i.test(msg);
+
+// remember the window from "maximum context length is 128000 tokens" / "215000 tokens > 200000 maximum"
+export function learnLimit(msg: string, sent: number) {
+  const m = /context(?: length| window)?(?: is| of)? (\d{4,})/i.exec(msg) || /> ?(\d{4,}) maximum/i.exec(msg) || /maximum[^\d]{0,30}(\d{4,})/i.exec(msg);
+  const max = m ? Number(m[1]) : Math.round(sent * 0.9);
+  if (max > 0) { ctxLimit.max = ctxLimit.model === cfg.model && ctxLimit.max ? Math.min(ctxLimit.max, max) : max; ctxLimit.model = cfg.model; }
+}
 
 // returns how many characters were removed
 export function prune(keep = KEEP): number {

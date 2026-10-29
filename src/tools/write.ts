@@ -12,6 +12,7 @@ export function toolWrite(a: any): Result {
   snapshot(abs);
   fs.mkdirSync(path.dirname(abs), { recursive: true });
   fs.writeFileSync(abs, a.content);
-  const n = a.content.split('\n').length;
-  return { text: `wrote ${relp(abs)} (${n} lines)`, show: gray(`${existed ? 'rewrote' : 'created'} · ${n} lines · ${kb(Buffer.byteLength(a.content))}`) };
+  const ls = a.content.replace(/\n$/, '').split('\n'), n = a.content ? ls.length : 0;
+  const preview = ls.slice(0, n).map((l: string, i: number) => gray(`${String(i + 1).padStart(4)} │ ${l}`));
+  return { preview, text: `wrote ${relp(abs)} (${n} lines)`, show: gray(`${existed ? 'rewrote' : 'created'} · ${n} lines · ${kb(Buffer.byteLength(a.content))}`) };
 }

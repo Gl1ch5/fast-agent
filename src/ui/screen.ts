@@ -13,7 +13,7 @@ export interface Row {
   wr?: string[]; ww?: number; wf?: boolean;
 }
 
-export const ui = { tui: false, scroll: 0, tick: 0, note: '', noteUntil: 0 };
+export const ui = { tui: false, scroll: 0, tick: 0, note: '', noteUntil: 0, thoughts: false };   // thoughts: Ctrl+O expands reasoning
 export const log: Row[] = [];
 let open = false;   // TUI: the last row still receives streamed text
 let atBOL = true;   // print mode: cursor is at the beginning of a line

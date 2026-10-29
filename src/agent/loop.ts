@@ -9,7 +9,7 @@ import { callOpenAI } from '../api/openai.ts';
 import { kt } from '../util.ts';
 import { conv, usage, agent, type Turn } from './state.ts';
 import { endStream } from './stream.ts';
-import { keepSmall, prune, tooLong } from './context.ts';
+import { keepSmall, prune, tooLong, learnLimit } from './context.ts';
 
 const VERBS = ['Thinking', 'Pondering', 'Working', 'Crafting', 'Cooking', 'Brewing', 'Computing', 'Conjuring'];
 
@@ -40,7 +40,7 @@ export async function runTurn(text: string) {
         } catch (e: any) {
           endStream();
           // the prompt no longer fits: drop old tool output and try once more
-          if (!retried && !sig.aborted && !acc.text && !acc.calls.length && tooLong(String(e.message)) && prune(2) > 0) {
+          if (!retried && !sig.aborted && !acc.text && !acc.calls.length && tooLong(String(e.message)) && (learnLimit(String(e.message), usage.last), prune(2) > 0)) {
             retried = true; line(gray('context too long — old tool output removed, retrying'), { ind: 2, mark: gray('✂ ') }); continue;
           }
           if (acc.text) conv.history.push({ role: 'assistant', text: acc.text, calls: [] });

@@ -48,6 +48,7 @@ export const editor = {
     }
     if (k.ctrl && n === 'd' && !this.chars.length && !busy) return this.quit();
     if (k.ctrl && n === 'l') { resetFrame(); return req(); }
+    if (k.ctrl && n === 'o') { ui.thoughts = !ui.thoughts; for (const r of log) if (r.kind === 'think') r.wr = undefined; return note(ui.thoughts ? 'reasoning expanded · ctrl+o to collapse' : 'reasoning collapsed', 1500); }
     if (n === 'pageup' || n === 'pagedown' || (k.shift && (n === 'up' || n === 'down'))) {
       const step = n === 'pageup' || n === 'pagedown' ? Math.max(1, (process.stdout.rows || 24) - 8) : 3;
       ui.scroll = Math.max(0, ui.scroll + (n === 'pageup' || n === 'up' ? step : -step));
