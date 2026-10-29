@@ -12,7 +12,7 @@ import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 // ─── version.ts ────────────────────────────────────────────────────────────
-const VERSION = '0.3.1';
+const VERSION = '0.3.2';
 const REPO = 'gl1ch5/fast-agent';
 const BRANCH = 'main';
 
@@ -392,12 +392,12 @@ interface PickOpts {
   multi?: boolean; selected?: string[]; search?: boolean; full?: boolean;
 }
 
-// single: resolves the chosen value; multi: the ticked values — Enter without any ticking in this
-// dialog also ticks the highlighted one, so "move to a model, Enter" adds it; Esc → null
+// single: resolves the chosen value; multi: Enter (or Space/Tab) ticks the highlighted item and the
+// "✓ Save" row on top resolves the ticked values; Esc → null
 function pick(o: PickOpts, raw: (Item | string)[]): Promise<any> {
   const items: Item[] = raw.map((x) => (typeof x === 'string' ? { value: x, label: x } : x));
   const chosen = new Set(o.selected || []);
-  let toggled = false;
+  const SAVE: Item = { value: '\0save', label: '' };
   const search = o.search ?? items.length > 8;
   const labW = Math.min(46, Math.max(4, ...items.map((i) => vw(i.label) + (i.tag ? vw(i.tag) + 1 : 0))) + 6);
   let q = Array.from(o.query || ''), sel = 0, top = 0, h = 10;
@@ -410,8 +410,11 @@ function pick(o: PickOpts, raw: (Item | string)[]): Promise<any> {
     const flat = qs.replace(/\s+/g, '');
     return items.filter((it) => { let j = 0; for (const ch of it.value.toLowerCase()) if (ch === flat[j]) j++; return j === flat.length; });
   };
-  let list = filter();
+  const shown = () => (o.multi ? [SAVE, ...filter()] : filter());
+  const refilter = () => { list = shown(); sel = o.multi && list.length > 1 ? 1 : 0; };
+  let list = shown();
   if (o.initial) sel = Math.max(0, list.findIndex((i) => i.value === o.initial));
+  if (o.multi && !sel && list.length > 1) sel = 1;
   return new Promise((resolve) => {
     const done = (v: any) => { closeModal(); resolve(v); };
     openModal({
@@ -424,16 +427,17 @@ function pick(o: PickOpts, raw: (Item | string)[]): Promise<any> {
         if (sel >= top + h) top = sel - h + 1;
         list.slice(top, top + h).forEach((it, i) => {
           const on = top + i === sel;
+          if (it === SAVE) return rows.push(`${on ? accent('❯') : ' '} ${green(bold('✓ Save'))} ${gray(`· ${chosen.size} selected`)}`);
           const box = o.multi ? (chosen.has(it.value) ? green('◉ ') : gray('○ ')) : '';
           const left = `${on ? accent('❯') : ' '} ${box}${on ? accent(bold(it.label)) : it.label}${it.tag ? ' ' + it.tag : ''}`;
           rows.push(it.hint ? pad(left, labW + 4) + gray(it.hint) : left);
         });
-        if (!list.length) rows.push(gray('  no matches'));
+        const n = list.length - (o.multi ? 1 : 0);
+        if (!n) rows.push(gray('  no matches'));
         rows.push('');
         const info: string[] = [];
-        if (list.length > h || list.length < items.length) info.push(`${list.length}/${items.length}`);
-        if (o.multi) info.push(`${chosen.size} selected`, 'space/tab tick', 'ctrl+a all');
-        info.push('↑↓ move', `enter ${o.multi ? 'confirm' : 'select'}`, 'esc back');
+        if (list.length > h || n < items.length) info.push(`${n}/${items.length}`);
+        info.push('↑↓ move', o.multi ? 'enter tick · ctrl+a all · ✓ Save to finish' : 'enter select', 'esc back');
         rows.push(gray(info.join(' · ')));
         return { rows };
       },
@@ -442,20 +446,19 @@ function pick(o: PickOpts, raw: (Item | string)[]): Promise<any> {
         if (n === 'escape' || (k.ctrl && n === 'c')) return done(null);
         if (n === 'return') {
           if (!o.multi) return list[sel] ? done(list[sel].value) : undefined;
-          if (!toggled && list[sel]) chosen.add(list[sel].value);
-          return done(items.filter((i) => chosen.has(i.value)).map((i) => i.value));
+          if (list[sel] === SAVE) return done(items.filter((i) => chosen.has(i.value)).map((i) => i.value));
         }
-        if (o.multi && (s === ' ' || n === 'tab')) { const it = list[sel]; toggled = true; if (it) { if (chosen.has(it.value)) chosen.delete(it.value); else chosen.add(it.value); } }
-        else if (o.multi && k.ctrl && n === 'a') { toggled = true; const all = list.every((i) => chosen.has(i.value)); for (const i of list) all ? chosen.delete(i.value) : chosen.add(i.value); }
+        if (o.multi && (n === 'return' || s === ' ' || n === 'tab')) { const it = list[sel]; if (it && it !== SAVE) { if (chosen.has(it.value)) chosen.delete(it.value); else chosen.add(it.value); } }
+        else if (o.multi && k.ctrl && n === 'a') { const its = list.filter((i) => i !== SAVE); const all = its.every((i) => chosen.has(i.value)); for (const i of its) all ? chosen.delete(i.value) : chosen.add(i.value); }
         else if (n === 'up') sel = sel > 0 ? sel - 1 : Math.max(0, list.length - 1);
         else if (n === 'down') sel = sel < list.length - 1 ? sel + 1 : 0;
         else if (n === 'pageup') sel = Math.max(0, sel - h);
         else if (n === 'pagedown') sel = Math.min(list.length - 1, sel + h);
         else if (n === 'home') sel = 0;
         else if (n === 'end') sel = Math.max(0, list.length - 1);
-        else if (search && n === 'backspace') { q.pop(); list = filter(); sel = 0; }
-        else if (search && k.ctrl && n === 'u') { q = []; list = filter(); sel = 0; }
-        else if (search && isPrintable(s, k)) { q.push(...Array.from(s!.replace(/[\r\n]/g, ''))); list = filter(); sel = 0; }
+        else if (search && n === 'backspace') { q.pop(); refilter(); }
+        else if (search && k.ctrl && n === 'u') { q = []; refilter(); }
+        else if (search && isPrintable(s, k)) { q.push(...Array.from(s!.replace(/[\r\n]/g, ''))); refilter(); }
         else if (!search && s && /^[1-9]$/.test(s) && Number(s) <= list.length) sel = Number(s) - 1;
         req();
       },
@@ -962,12 +965,14 @@ async function chooseModelsFor(name: string, step = -1): Promise<boolean> {
     // models already in /model come first, so adding one more is a single tick
     const sorted = [...ids.filter((id) => pre.includes(id)), ...ids.filter((id) => !pre.includes(id))];
     chosen = await pick({ title: `Models · ${name}`, step: st, full, multi: true, selected: pre, initial: pre[0],
-      desc: `${ids.length} models available. Space or Tab ticks a model, Enter saves the ticked ones to /model.\nEnter alone adds the highlighted model.` }, sorted);
+      desc: `${ids.length} models available. Enter ticks or unticks a model; ✓ Save on top keeps the ticked ones in /model.` }, sorted);
   }
-  if (!chosen || !chosen.length) return false;
+  if (!chosen) return false;
   const labels = chosen.map((id) => `${name}/${id}`);
   cfg.models = [...cfg.models.filter((m) => !m.startsWith(name + '/')), ...labels];
   const curLabel = `${cfg.provider}/${cfg.model}`;
+  // all unticked: the provider's models are gone; keep the current model unless it was one of them
+  if (!labels.length) { if (cfg.provider === name && cfg.models.length) setModel(cfg.models[0], true); else saved(); return cfg.models.length > 0; }
   if (labels.includes(curLabel)) { saved(); return true; }
   const def = labels.length === 1 ? labels[0] : await pick({ title: 'Default model', step: st, full, search: false, desc: 'Which one should fa use now?' }, labels);
   setModel(def || labels[0], true);

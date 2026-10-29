@@ -81,12 +81,14 @@ export async function chooseModelsFor(name: string, step = -1): Promise<boolean>
     // models already in /model come first, so adding one more is a single tick
     const sorted = [...ids.filter((id) => pre.includes(id)), ...ids.filter((id) => !pre.includes(id))];
     chosen = await pick({ title: `Models · ${name}`, step: st, full, multi: true, selected: pre, initial: pre[0],
-      desc: `${ids.length} models available. Space or Tab ticks a model, Enter saves the ticked ones to /model.\nEnter alone adds the highlighted model.` }, sorted);
+      desc: `${ids.length} models available. Enter ticks or unticks a model; ✓ Save on top keeps the ticked ones in /model.` }, sorted);
   }
-  if (!chosen || !chosen.length) return false;
+  if (!chosen) return false;
   const labels = chosen.map((id) => `${name}/${id}`);
   cfg.models = [...cfg.models.filter((m) => !m.startsWith(name + '/')), ...labels];
   const curLabel = `${cfg.provider}/${cfg.model}`;
+  // all unticked: the provider's models are gone; keep the current model unless it was one of them
+  if (!labels.length) { if (cfg.provider === name && cfg.models.length) setModel(cfg.models[0], true); else saved(); return cfg.models.length > 0; }
   if (labels.includes(curLabel)) { saved(); return true; }
   const def = labels.length === 1 ? labels[0] : await pick({ title: 'Default model', step: st, full, search: false, desc: 'Which one should fa use now?' }, labels);
   setModel(def || labels[0], true);
