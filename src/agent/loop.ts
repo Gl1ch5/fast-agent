@@ -20,15 +20,17 @@ export async function runTurn(text: string) {
   agent.ctrl = ctrl; agent.t0 = Date.now(); agent.chars = 0; agent.mode = '';
   const u0 = { ...usage };
   const verb = VERBS[Math.floor(Math.random() * VERBS.length)];
-  let steps = 0;
+  let steps = 0, genMs = 0;   // genMs: time spent streaming output, for the average tok/s
   try {
     for (;;) {
       steps++;
       spin.start(steps === 1 ? verb : 'Working');
       const acc: Turn = { text: '', calls: [], stop: '' };
+      agent.firstAt = 0;
       try {
         const p = cur();
         await (p.type === 'anthropic' ? callAnthropic(p, sig, acc) : callOpenAI(p, sig, acc));
+        if (agent.firstAt) genMs += Date.now() - agent.firstAt;
       } catch (e) {
         endStream();
         if (acc.text) conv.history.push({ role: 'assistant', text: acc.text, calls: [] });
@@ -54,6 +56,8 @@ export async function runTurn(text: string) {
   }
   const s = ((Date.now() - agent.t0) / 1000).toFixed(1);
   const cache = usage.cache - u0.cache;
+  const outTok = usage.out - u0.out || Math.round(agent.chars / 4);
+  const tps = genMs > 300 ? ` · ${Math.round(outTok / (genMs / 1000))} tok/s` : '';
   gap();
-  line(gray(`${s}s · ↑${kt(usage.in - u0.in)}${cache ? ` (${kt(cache)} cached)` : ''} ↓${kt(usage.out - u0.out)} · ${steps} step${steps > 1 ? 's' : ''}`), { ind: 2, mark: gray('✻ '), kind: 'meta' });
+  line(gray(`${s}s · ↑${kt(usage.in - u0.in)}${cache ? ` (${kt(cache)} cached)` : ''} ↓${kt(outTok)}${tps} · ${steps} step${steps > 1 ? 's' : ''}`), { ind: 2, mark: gray('✻ '), kind: 'meta' });
 }

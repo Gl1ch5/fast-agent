@@ -6,14 +6,14 @@ import { agent } from './state.ts';
 import type { Call } from '../tools/types.ts';
 
 export function onText(s: string) {
-  agent.chars += s.length;
+  agent.chars += s.length; agent.firstAt ||= Date.now();
   if (!ui.tui) { if (agent.mode === 'think') out('\n'); agent.mode = 'text'; out(s); return; }
   if (agent.mode !== 'text') { endThink(); gap(); agent.mode = 'text'; }
   out(s, { md: true, ind: 2, mark: accent('● '), kind: 'text' });
 }
 
 export function onThink(s: string) {
-  agent.chars += s.length;
+  agent.chars += s.length; agent.firstAt ||= Date.now();
   if (!ui.tui) { if (agent.mode !== 'think') endLine(); agent.mode = 'think'; out(gray(s)); return; }
   if (agent.mode !== 'think') {
     if (agent.mode === 'text') endLine();
@@ -39,6 +39,7 @@ const DOING: Record<string, string> = { write: 'Writing', edit: 'Editing', read:
 
 // the model is streaming tool-call arguments
 export function toolProgress(name: string, raw: string) {
+  agent.firstAt ||= Date.now();
   const p = /"path"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(raw)?.[1] ?? /"command"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(raw)?.[1] ?? '';
   if (agent.mode) { endThink(); endLine(); agent.mode = ''; }
   if (ui.tui) { gap(); agent.draft = { name, raw }; spin.start(DOING[name] || name); return; }

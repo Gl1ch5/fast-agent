@@ -45,6 +45,17 @@ export function wrapLog(W: number): string[] {
   return all;
 }
 
+// live output speed: estimated tokens (chars / 4) over the last 2 seconds
+const tpsSamples: [number, number][] = [];
+function liveTps(): number {
+  const now = Date.now();
+  if (tpsSamples.length && agent.chars < tpsSamples[tpsSamples.length - 1][1]) tpsSamples.length = 0;   // new request
+  tpsSamples.push([now, agent.chars]);
+  while (tpsSamples.length > 2 && now - tpsSamples[0][0] > 2000) tpsSamples.shift();
+  const [t0, c0] = tpsSamples[0], dt = (now - t0) / 1000;
+  return dt >= 0.5 ? (agent.chars - c0) / 4 / dt : 0;
+}
+
 const STAR = ['·', '✢', '✶', '✻', '✽', '✻', '✶', '✢'];   // no ✳: Windows draws it as a green emoji
 
 // running tool cards, shown right after the transcript
@@ -63,7 +74,8 @@ function statusRows(W: number): string[] {
   let st = `${accent(STAR[ui.tick % STAR.length])} ${shimmer((spin.text || 'Working') + '…', ui.tick)}`;
   if (busy) {
     const secs = Math.floor((Date.now() - agent.t0) / 1000);
-    st += gray(` (${secs}s · ↓ ${kt(Math.round(agent.chars / 4))} tokens · esc to interrupt)`);
+    const tps = liveTps();
+    st += gray(` (${secs}s · ↓ ${kt(Math.round(agent.chars / 4))} tokens${tps >= 1 ? ` · ${Math.round(tps)} tok/s` : ''} · esc to interrupt)`);
   }
   rows.push(fit(st, W));
   const last = agent.thinking ? agent.thinkBuf.trim().split('\n').pop() || '' : '';

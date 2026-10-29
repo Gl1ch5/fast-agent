@@ -11,7 +11,7 @@ import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 // ─── version.ts ────────────────────────────────────────────────────────────
-const VERSION = '0.2.7';
+const VERSION = '0.2.8';
 const REPO = 'gl1ch5/fast-agent';
 const BRANCH = 'main';
 
@@ -429,6 +429,7 @@ const usage = { in: 0, out: 0, cache: 0 };
 const agent = {
   ctrl: null as AbortController | null,
   t0: 0, chars: 0,
+  firstAt: 0,   // first streamed token of the current model call (for tok/s)
   mode: '' as 'text' | 'think' | '',
   thinking: false, thinkBuf: '', thinkT0: 0,
   draft: null as { name: string; raw: string } | null,   // tool call still being streamed
@@ -1518,6 +1519,17 @@ function wrapLog(W: number): string[] {
   return all;
 }
 
+// live output speed: estimated tokens (chars / 4) over the last 2 seconds
+const tpsSamples: [number, number][] = [];
+function liveTps(): number {
+  const now = Date.now();
+  if (tpsSamples.length && agent.chars < tpsSamples[tpsSamples.length - 1][1]) tpsSamples.length = 0;   // new request
+  tpsSamples.push([now, agent.chars]);
+  while (tpsSamples.length > 2 && now - tpsSamples[0][0] > 2000) tpsSamples.shift();
+  const [t0, c0] = tpsSamples[0], dt = (now - t0) / 1000;
+  return dt >= 0.5 ? (agent.chars - c0) / 4 / dt : 0;
+}
+
 const STAR = ['·', '✢', '✶', '✻', '✽', '✻', '✶', '✢'];   // no ✳: Windows draws it as a green emoji
 
 // running tool cards, shown right after the transcript
@@ -1536,7 +1548,8 @@ function statusRows(W: number): string[] {
   let st = `${accent(STAR[ui.tick % STAR.length])} ${shimmer((spin.text || 'Working') + '…', ui.tick)}`;
   if (busy) {
     const secs = Math.floor((Date.now() - agent.t0) / 1000);
-    st += gray(` (${secs}s · ↓ ${kt(Math.round(agent.chars / 4))} tokens · esc to interrupt)`);
+    const tps = liveTps();
+    st += gray(` (${secs}s · ↓ ${kt(Math.round(agent.chars / 4))} tokens${tps >= 1 ? ` · ${Math.round(tps)} tok/s` : ''} · esc to interrupt)`);
   }
   rows.push(fit(st, W));
   const last = agent.thinking ? agent.thinkBuf.trim().split('\n').pop() || '' : '';
@@ -1846,14 +1859,14 @@ async function runTools(calls: Call[], sig: AbortSignal): Promise<Result[]> {
 // Turning streamed model output into transcript rows and status updates.
 
 function onText(s: string) {
-  agent.chars += s.length;
+  agent.chars += s.length; agent.firstAt ||= Date.now();
   if (!ui.tui) { if (agent.mode === 'think') out('\n'); agent.mode = 'text'; out(s); return; }
   if (agent.mode !== 'text') { endThink(); gap(); agent.mode = 'text'; }
   out(s, { md: true, ind: 2, mark: accent('● '), kind: 'text' });
 }
 
 function onThink(s: string) {
-  agent.chars += s.length;
+  agent.chars += s.length; agent.firstAt ||= Date.now();
   if (!ui.tui) { if (agent.mode !== 'think') endLine(); agent.mode = 'think'; out(gray(s)); return; }
   if (agent.mode !== 'think') {
     if (agent.mode === 'text') endLine();
@@ -1879,6 +1892,7 @@ const DOING: Record<string, string> = { write: 'Writing', edit: 'Editing', read:
 
 // the model is streaming tool-call arguments
 function toolProgress(name: string, raw: string) {
+  agent.firstAt ||= Date.now();
   const p = /"path"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(raw)?.[1] ?? /"command"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(raw)?.[1] ?? '';
   if (agent.mode) { endThink(); endLine(); agent.mode = ''; }
   if (ui.tui) { gap(); agent.draft = { name, raw }; spin.start(DOING[name] || name); return; }
@@ -2039,15 +2053,17 @@ async function runTurn(text: string) {
   agent.ctrl = ctrl; agent.t0 = Date.now(); agent.chars = 0; agent.mode = '';
   const u0 = { ...usage };
   const verb = VERBS[Math.floor(Math.random() * VERBS.length)];
-  let steps = 0;
+  let steps = 0, genMs = 0;   // genMs: time spent streaming output, for the average tok/s
   try {
     for (;;) {
       steps++;
       spin.start(steps === 1 ? verb : 'Working');
       const acc: Turn = { text: '', calls: [], stop: '' };
+      agent.firstAt = 0;
       try {
         const p = cur();
         await (p.type === 'anthropic' ? callAnthropic(p, sig, acc) : callOpenAI(p, sig, acc));
+        if (agent.firstAt) genMs += Date.now() - agent.firstAt;
       } catch (e) {
         endStream();
         if (acc.text) conv.history.push({ role: 'assistant', text: acc.text, calls: [] });
@@ -2073,8 +2089,10 @@ async function runTurn(text: string) {
   }
   const s = ((Date.now() - agent.t0) / 1000).toFixed(1);
   const cache = usage.cache - u0.cache;
+  const outTok = usage.out - u0.out || Math.round(agent.chars / 4);
+  const tps = genMs > 300 ? ` · ${Math.round(outTok / (genMs / 1000))} tok/s` : '';
   gap();
-  line(gray(`${s}s · ↑${kt(usage.in - u0.in)}${cache ? ` (${kt(cache)} cached)` : ''} ↓${kt(usage.out - u0.out)} · ${steps} step${steps > 1 ? 's' : ''}`), { ind: 2, mark: gray('✻ '), kind: 'meta' });
+  line(gray(`${s}s · ↑${kt(usage.in - u0.in)}${cache ? ` (${kt(cache)} cached)` : ''} ↓${kt(outTok)}${tps} · ${steps} step${steps > 1 ? 's' : ''}`), { ind: 2, mark: gray('✻ '), kind: 'meta' });
 }
 
 // ─── main.ts ───────────────────────────────────────────────────────────────

@@ -15,6 +15,7 @@ export const usage = { in: 0, out: 0, cache: 0 };
 export const agent = {
   ctrl: null as AbortController | null,
   t0: 0, chars: 0,
+  firstAt: 0,   // first streamed token of the current model call (for tok/s)
   mode: '' as 'text' | 'think' | '',
   thinking: false, thinkBuf: '', thinkT0: 0,
   draft: null as { name: string; raw: string } | null,   // tool call still being streamed
