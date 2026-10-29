@@ -12,7 +12,7 @@ import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 // ─── version.ts ────────────────────────────────────────────────────────────
-const VERSION = '0.3.0';
+const VERSION = '0.3.1';
 const REPO = 'gl1ch5/fast-agent';
 const BRANCH = 'main';
 
@@ -392,10 +392,12 @@ interface PickOpts {
   multi?: boolean; selected?: string[]; search?: boolean; full?: boolean;
 }
 
-// single: resolves the chosen value; multi: the chosen values (the highlighted one if none ticked); Esc → null
+// single: resolves the chosen value; multi: the ticked values — Enter without any ticking in this
+// dialog also ticks the highlighted one, so "move to a model, Enter" adds it; Esc → null
 function pick(o: PickOpts, raw: (Item | string)[]): Promise<any> {
   const items: Item[] = raw.map((x) => (typeof x === 'string' ? { value: x, label: x } : x));
   const chosen = new Set(o.selected || []);
+  let toggled = false;
   const search = o.search ?? items.length > 8;
   const labW = Math.min(46, Math.max(4, ...items.map((i) => vw(i.label) + (i.tag ? vw(i.tag) + 1 : 0))) + 6);
   let q = Array.from(o.query || ''), sel = 0, top = 0, h = 10;
@@ -430,7 +432,7 @@ function pick(o: PickOpts, raw: (Item | string)[]): Promise<any> {
         rows.push('');
         const info: string[] = [];
         if (list.length > h || list.length < items.length) info.push(`${list.length}/${items.length}`);
-        if (o.multi) info.push(`${chosen.size} selected`, 'space tick', 'ctrl+a all');
+        if (o.multi) info.push(`${chosen.size} selected`, 'space/tab tick', 'ctrl+a all');
         info.push('↑↓ move', `enter ${o.multi ? 'confirm' : 'select'}`, 'esc back');
         rows.push(gray(info.join(' · ')));
         return { rows };
@@ -440,11 +442,11 @@ function pick(o: PickOpts, raw: (Item | string)[]): Promise<any> {
         if (n === 'escape' || (k.ctrl && n === 'c')) return done(null);
         if (n === 'return') {
           if (!o.multi) return list[sel] ? done(list[sel].value) : undefined;
-          const vals = items.filter((i) => chosen.has(i.value)).map((i) => i.value);
-          return done(vals.length ? vals : list[sel] ? [list[sel].value] : []);
+          if (!toggled && list[sel]) chosen.add(list[sel].value);
+          return done(items.filter((i) => chosen.has(i.value)).map((i) => i.value));
         }
-        if (o.multi && s === ' ') { const it = list[sel]; if (it) { if (chosen.has(it.value)) chosen.delete(it.value); else chosen.add(it.value); } }
-        else if (o.multi && k.ctrl && n === 'a') { const all = list.every((i) => chosen.has(i.value)); for (const i of list) all ? chosen.delete(i.value) : chosen.add(i.value); }
+        if (o.multi && (s === ' ' || n === 'tab')) { const it = list[sel]; toggled = true; if (it) { if (chosen.has(it.value)) chosen.delete(it.value); else chosen.add(it.value); } }
+        else if (o.multi && k.ctrl && n === 'a') { toggled = true; const all = list.every((i) => chosen.has(i.value)); for (const i of list) all ? chosen.delete(i.value) : chosen.add(i.value); }
         else if (n === 'up') sel = sel > 0 ? sel - 1 : Math.max(0, list.length - 1);
         else if (n === 'down') sel = sel < list.length - 1 ? sel + 1 : 0;
         else if (n === 'pageup') sel = Math.max(0, sel - h);
@@ -960,7 +962,7 @@ async function chooseModelsFor(name: string, step = -1): Promise<boolean> {
     // models already in /model come first, so adding one more is a single tick
     const sorted = [...ids.filter((id) => pre.includes(id)), ...ids.filter((id) => !pre.includes(id))];
     chosen = await pick({ title: `Models · ${name}`, step: st, full, multi: true, selected: pre, initial: pre[0],
-      desc: `${ids.length} models available. Tick the ones you want in /model, untick to remove.` }, sorted);
+      desc: `${ids.length} models available. Space or Tab ticks a model, Enter saves the ticked ones to /model.\nEnter alone adds the highlighted model.` }, sorted);
   }
   if (!chosen || !chosen.length) return false;
   const labels = chosen.map((id) => `${name}/${id}`);

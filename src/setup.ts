@@ -81,7 +81,7 @@ export async function chooseModelsFor(name: string, step = -1): Promise<boolean>
     // models already in /model come first, so adding one more is a single tick
     const sorted = [...ids.filter((id) => pre.includes(id)), ...ids.filter((id) => !pre.includes(id))];
     chosen = await pick({ title: `Models · ${name}`, step: st, full, multi: true, selected: pre, initial: pre[0],
-      desc: `${ids.length} models available. Tick the ones you want in /model, untick to remove.` }, sorted);
+      desc: `${ids.length} models available. Space or Tab ticks a model, Enter saves the ticked ones to /model.\nEnter alone adds the highlighted model.` }, sorted);
   }
   if (!chosen || !chosen.length) return false;
   const labels = chosen.map((id) => `${name}/${id}`);
