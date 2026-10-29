@@ -1,11 +1,14 @@
 // Slash commands. COMMANDS drives both /help and the suggestion popup.
 import fs from 'node:fs';
 import { cfg, provs, keyOf, isLocal, cur, EFFORTS, type PType } from './config.ts';
+import { kt } from './util.ts';
 import { accent, bold, cyan, gray, green, red, yellow, pad } from './ui/ansi.ts';
 import { line, gap, log, ui, req } from './ui/screen.ts';
 import { pick, confirm } from './ui/modal.ts';
 import { banner } from './ui/welcome.ts';
 import { conv, usage } from './agent/state.ts';
+import { prune } from './agent/context.ts';
+import { newSession, listSessions, loadSession, ago } from './session.ts';
 import { systemPrompt } from './prompt.ts';
 import { undoStack, relp } from './tools/sandbox.ts';
 import { saved, setup, chooseModel, manageModels, chooseModelsFor, chooseKey, signIn } from './setup.ts';
@@ -26,6 +29,8 @@ export const COMMANDS: [string, string][] = [
   ['/safe', 'ask before every shell command'],
   ['/undo', 'revert file changes from the last request'],
   ['/clear', 'start a new conversation'],
+  ['/resume', 'continue an earlier conversation in this directory'],
+  ['/compact', 'drop old tool output to free context'],
   ['/update', 'update fa to the latest version'],
   ['/help', 'commands and keys'],
   ['/exit', 'quit'],
@@ -41,14 +46,30 @@ export async function command(input: string): Promise<boolean> {
     case '/help': case '/?':
       gap();
       for (const [c, d] of COMMANDS) line(`${pad(accent(c), 11)} ${d}`, { ind: 2 });
-      line(gray('Esc stops the agent · Enter while it works queues a message · Ctrl+J or \\+Enter = new line'), { ind: 2 });
+      line(gray('!command runs a shell command yourself · Esc stops the agent · Enter while it works queues a message · Ctrl+J or \\+Enter = new line'), { ind: 2 });
       line(gray('↑↓ history · Tab completes a command · mouse wheel, PgUp/PgDn or Shift+↑↓ scroll · Shift+drag selects text · Ctrl+L redraw · Ctrl+C ×2 quit'), { ind: 2 });
       break;
     case '/clear': case '/new':
-      conv.history = []; conv.system = systemPrompt(); usage.in = usage.out = usage.cache = 0;
+      conv.history = []; conv.system = systemPrompt(); usage.in = usage.out = usage.cache = usage.last = 0; newSession();
       log.length = 0; ui.scroll = 0; banner();
       line(gray('new conversation'), { ind: 2 });
       break;
+    case '/resume': case '/continue': {
+      const list = listSessions();
+      if (!list.length) { line(gray('no earlier conversations in this directory'), { ind: 2 }); break; }
+      const id = await pick({ title: 'Resume a conversation' },
+        list.map((s) => ({ value: s.id, label: s.title || '(empty)', hint: `${ago(s.updated)} · ${s.turns} msg` })));
+      if (!id) break;
+      conv.system = systemPrompt(); usage.last = 0;
+      log.length = 0; ui.scroll = 0; banner();
+      if (!loadSession(id)) line(red('could not read that conversation'), { ind: 2 });
+      break;
+    }
+    case '/compact': {
+      const cut = prune(2);
+      ok(cut ? `old tool output removed · ~${kt(Math.round(cut / 4))} tokens freed` : 'nothing to compact');
+      break;
+    }
     case '/model': case '/m': await chooseModel(arg); break;
     case '/models': await manageModels(); break;
     case '/setup': await setup(); break;

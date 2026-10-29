@@ -14,14 +14,15 @@ usage: fa [options] [prompt]
   -m, --model P/M      provider/model, e.g. anthropic/claude-opus-5-5
   -e, --effort LVL     auto | low | medium | high | xhigh | max
   -C, --cwd DIR        working directory (the agent is locked inside it)
+  -c, --continue       continue the last conversation in this directory
       --safe           ask before every shell command
       --update         update fa to the latest version and exit
   -h, --help           this help
 
 in the app: / shows commands, /setup configures providers and models,
-Esc stops the agent, Ctrl+J or "\\" + Enter = new line`;
+Esc stops the agent, Ctrl+J or "\\" + Enter = new line, !command runs a shell command`;
 
-export const opt = { print: false, model: '', cwd: '', effort: '', safe: false, update: false };
+export const opt = { print: false, model: '', cwd: '', effort: '', safe: false, update: false, cont: false };
 export const rest: string[] = [];
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
@@ -29,6 +30,7 @@ for (let i = 2; i < process.argv.length; i++) {
   else if (a === '-m' || a === '--model') opt.model = process.argv[++i] ?? '';
   else if (a === '-e' || a === '--effort') opt.effort = process.argv[++i] ?? '';
   else if (a === '-C' || a === '--cwd') opt.cwd = process.argv[++i] ?? '';
+  else if (a === '-c' || a === '--continue') opt.cont = true;
   else if (a === '--safe') opt.safe = true;
   else if (a === '--update' || a === '--upgrade') opt.update = true;
   else if (a === '-h' || a === '--help') { console.log(HELP); process.exit(0); }

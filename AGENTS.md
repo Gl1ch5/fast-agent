@@ -28,16 +28,19 @@ src/env.ts         CLI args, ROOT          src/config.ts   ~/.fa/config.json, pr
 src/prompt.ts      system prompt           src/setup.ts    setup wizard, model selection
 src/commands.ts    slash commands          src/update.ts   self-update
 src/sync.ts        account login, settings sync with the fa-sync server
-src/agent/         agent loop, streaming, shared turn state
+src/session.ts     saved conversations per directory (-c, /resume)
+src/agent/         agent loop, streaming, shared turn state, context trimming, !shell
 src/api/           Anthropic, OpenAI-compatible, /models, HTTP + SSE
 src/tools/         write, edit, read, shell, sandbox + undo
 src/shell/         shell command → short label, progress parsing
 src/ui/            screen/log, render, input, modals, tool cards, welcome, colors
 build.ts           bundler: src/ → fa.ts
+tests/smoke.ts     end-to-end print-mode test against a fake OpenAI server (CI runs it)
 server/fa-sync.ts  sync server (runs on grzxk.ru as fa-sync.service behind nginx /fa-sync/); not bundled
 ```
 
 ## Checking changes
 
 - `node src/main.ts` runs straight from the sources; `node build.ts` also smoke-tests the bundle.
+- `node tests/smoke.ts` must pass before a push.
 - The TUI needs a real terminal; for scripted checks use `fa -p "..."` against any OpenAI-compatible server.

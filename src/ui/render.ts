@@ -7,7 +7,7 @@ import { M } from './modal.ts';
 import { editor, queue, suggestions, inputView } from './input.ts';
 import { cards, cardRows } from './cards.ts';
 import { draftRows } from './draft.ts';
-import { agent } from '../agent/state.ts';
+import { agent, usage } from '../agent/state.ts';
 import { cfg, modelLabel } from '../config.ts';
 import { VERSION } from '../version.ts';
 import { cmpVer, kt } from '../util.ts';
@@ -99,7 +99,7 @@ function footer(W: number): string {
   else if (agent.ctrl) left = gray('esc interrupt · enter queues a message');
   else left = gray('/ commands · ↑↓ history · wheel/PgUp scroll');
   const upd = cfg.latest && cmpVer(cfg.latest, VERSION) > 0 ? yellow(`↑ ${cfg.latest} · /update`) + gray(' · ') : '';
-  const right = upd + gray(`${modelLabel()} · ${cfg.effort}${cfg.fast ? ' · fast' : ''}${cfg.safe ? ' · safe' : ''}`);
+  const right = upd + gray(`${usage.last ? `ctx ${kt(usage.last)} · ` : ''}${modelLabel()} · ${cfg.effort}${cfg.fast ? ' · fast' : ''}${cfg.safe ? ' · safe' : ''}`);
   const sp = W - vw(left) - vw(right);
   return sp >= 2 ? left + ' '.repeat(sp) + right : fit(left, W);
 }

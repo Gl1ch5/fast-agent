@@ -6,7 +6,7 @@ import { feedCard, type Card } from '../ui/cards.ts';
 import type { Result } from './types.ts';
 
 export const SHELL = process.env.FA_SHELL || (IS_WIN ? 'powershell' : fs.existsSync('/bin/bash') ? 'bash' : 'sh');
-const MAX_OUT = 30_000;
+const MAX_OUT = 12_000;   // tail kept for the model; long logs are mostly noise
 
 export function toolShell(a: any, sig: AbortSignal, card?: Card): Promise<Result> {
   const cmd = String(a.command ?? '');
@@ -38,7 +38,7 @@ export function toolShell(a: any, sig: AbortSignal, card?: Card): Promise<Result
     const done = (code: number | null, extra = '') => {
       clearTimeout(timer); sig.removeEventListener('abort', kill);
       let o = Buffer.concat(chunks).toString('utf8').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').trimEnd();
-      if (o.length > MAX_OUT) o = `… [${o.length - MAX_OUT} chars cut]\n` + o.slice(-MAX_OUT);
+      if (o.length > MAX_OUT) o = `… [first ${o.length - MAX_OUT} chars cut — narrow the command with grep, head or tail if you need them]\n` + o.slice(-MAX_OUT);
       const status = timedOut ? `killed after ${timeout}s timeout` : sig.aborted ? 'interrupted' : `exit ${code}`;
       const tail = o.split('\n').map((l) => l.split('\r').filter((x) => x.trim()).pop() ?? '').join('\n');
       resolve({ text: `${status}${extra}\n${o}`, err: code !== 0, show: code === 0 ? (o ? '' : gray('no output')) : red(status + extra), tail });

@@ -27,7 +27,7 @@ export async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
     if (ch.error) throw new Error(ch.error.message || JSON.stringify(ch.error));
     if (ch.usage) {
       const c = ch.usage.prompt_tokens_details?.cached_tokens || ch.usage.prompt_cache_hit_tokens || 0;
-      usage.in += ch.usage.prompt_tokens || 0; usage.out += ch.usage.completion_tokens || 0; usage.cache += c;
+      usage.last = ch.usage.prompt_tokens || usage.last; usage.in += ch.usage.prompt_tokens || 0; usage.out += ch.usage.completion_tokens || 0; usage.cache += c;
     }
     const choice = ch.choices?.[0];
     if (!choice) continue;

@@ -12,7 +12,7 @@ import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 // ─── version.ts ────────────────────────────────────────────────────────────
-const VERSION = '0.3.2';
+const VERSION = '0.4.0';
 const REPO = 'gl1ch5/fast-agent';
 const BRANCH = 'main';
 
@@ -30,14 +30,15 @@ usage: fa [options] [prompt]
   -m, --model P/M      provider/model, e.g. anthropic/claude-opus-5-5
   -e, --effort LVL     auto | low | medium | high | xhigh | max
   -C, --cwd DIR        working directory (the agent is locked inside it)
+  -c, --continue       continue the last conversation in this directory
       --safe           ask before every shell command
       --update         update fa to the latest version and exit
   -h, --help           this help
 
 in the app: / shows commands, /setup configures providers and models,
-Esc stops the agent, Ctrl+J or "\\" + Enter = new line`;
+Esc stops the agent, Ctrl+J or "\\" + Enter = new line, !command runs a shell command`;
 
-const opt = { print: false, model: '', cwd: '', effort: '', safe: false, update: false };
+const opt = { print: false, model: '', cwd: '', effort: '', safe: false, update: false, cont: false };
 const rest: string[] = [];
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
@@ -45,6 +46,7 @@ for (let i = 2; i < process.argv.length; i++) {
   else if (a === '-m' || a === '--model') opt.model = process.argv[++i] ?? '';
   else if (a === '-e' || a === '--effort') opt.effort = process.argv[++i] ?? '';
   else if (a === '-C' || a === '--cwd') opt.cwd = process.argv[++i] ?? '';
+  else if (a === '-c' || a === '--continue') opt.cont = true;
   else if (a === '--safe') opt.safe = true;
   else if (a === '--update' || a === '--upgrade') opt.update = true;
   else if (a === '-h' || a === '--help') { console.log(HELP); process.exit(0); }
@@ -165,7 +167,7 @@ type PType = 'openai' | 'anthropic';
 interface Prov { type: PType; url: string; key?: string; env?: string; headers?: Record<string, string> }
 interface Cfg {
   provider: string; model: string; effort: string; fast: boolean; safe: boolean;
-  maxTokens?: number; providers: Record<string, Partial<Prov>>;
+  maxTokens?: number; compactAt?: number; providers: Record<string, Partial<Prov>>;
   models: string[];        // "provider/model" labels picked during setup — what /model offers
   setupDone: boolean;
   latest?: string; lastCheck?: number;
@@ -529,12 +531,12 @@ async function loading<T>(title: string, text: string, p: Promise<T>): Promise<T
 type Msg =
   | { role: 'user'; text: string }
   | { role: 'assistant'; text: string; calls: Call[]; blocks?: any[]; prov?: string }
-  | { role: 'tool'; id: string; text: string; err?: boolean };
+  | { role: 'tool'; id: string; text: string; err?: boolean; pruned?: boolean };
 
 interface Turn { text: string; calls: Call[]; blocks?: any[]; stop: string }
 
 const conv = { history: [] as Msg[], system: '' };
-const usage = { in: 0, out: 0, cache: 0 };
+const usage = { in: 0, out: 0, cache: 0, last: 0 };   // last: input tokens of the newest call = context size
 
 // the running request: what the status line shows
 const agent = {
@@ -611,6 +613,158 @@ function banner() {
   log.push({ s: `${accent('✻')} ${bold('fa')} ${gray(`v${VERSION}  ·  ${tildify(ROOT)}`)}`, clip: true });
   log.push({ s: '' });
   req();
+}
+
+// ─── agent/context.ts ──────────────────────────────────────────────────────
+// Keeping the context small. Old tool output and the file contents the model already wrote
+// are replaced by short stubs once the conversation grows past cfg.compactAt input tokens
+// (or when the API says the prompt is too long). The newest tool results stay intact.
+
+const KEEP = 8;      // newest tool results that are never pruned
+const SMALL = 400;   // shorter texts are not worth a stub
+
+const compactAt = () => cfg.compactAt || 100_000;
+const tooLong = (msg: string) => /context|too long|too many tokens|maximum.*tokens|token limit|exceeds/i.test(msg);
+
+// returns how many characters were removed
+function prune(keep = KEEP): number {
+  const h = conv.history;
+  let toolsSeen = 0, cut = 0, from = h.length;
+  for (let i = h.length - 1; i >= 0; i--) if (h[i].role === 'tool' && ++toolsSeen > keep) { from = i + 1; break; }
+  if (toolsSeen <= keep) return 0;
+  for (let i = 0; i < from; i++) {
+    const m = h[i];
+    if (m.role === 'tool' && !m.pruned && m.text.length > SMALL) {
+      cut += m.text.length;
+      m.text = `[old output removed to save context (${m.text.length} chars) — read or run again if you need it]`;
+      m.pruned = true;
+    } else if (m.role === 'assistant') {
+      for (const c of m.calls) cut += stubArgs(c.args);
+      for (const b of m.blocks || []) if (b.type === 'tool_use') stubArgs(b.input);
+    }
+  }
+  return cut;
+}
+
+// write content and edit texts the model sent earlier: the files hold them now
+function stubArgs(a: any): number {
+  if (!a || typeof a !== 'object') return 0;
+  let cut = 0;
+  if (typeof a.content === 'string' && a.content.length > SMALL) { cut += a.content.length; a.content = `[${a.content.length} chars written]`; }
+  if (Array.isArray(a.edits)) for (const e of a.edits) for (const k of ['old', 'new']) {
+    if (typeof e?.[k] === 'string' && e[k].length > SMALL) { cut += e[k].length; e[k] = `[${e[k].length} chars]`; }
+  }
+  return cut;
+}
+
+// before each model call: prune when the last request was already large
+function keepSmall(): number {
+  return usage.last > compactAt() ? prune() : 0;
+}
+
+// ─── tools/sandbox.ts ──────────────────────────────────────────────────────
+// Every file tool is locked inside ROOT; changed files are snapshotted for /undo.
+
+function safePath(p: string): string {
+  if (typeof p !== 'string' || !p) throw new Error('path is required');
+  const abs = path.resolve(ROOT, p);
+  let real = abs, probe = abs;
+  while (!fs.existsSync(probe)) { const up = path.dirname(probe); if (up === probe) break; probe = up; }
+  try { real = path.join(fs.realpathSync(probe), path.relative(probe, abs)); } catch {}
+  const rel = path.relative(ROOT, real);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(`access denied: ${p} is outside the working directory`);
+  return abs;
+}
+const relp = (abs: string) => path.relative(ROOT, abs).split(path.sep).join('/') || '.';
+
+// one map per request: file → content before the request (null = did not exist)
+const undoStack: Map<string, Buffer | null>[] = [];
+function snapshot(abs: string) {
+  const top = undoStack[undoStack.length - 1];
+  if (top && !top.has(abs)) top.set(abs, fs.existsSync(abs) ? fs.readFileSync(abs) : null);
+}
+
+// ─── tools/write.ts ────────────────────────────────────────────────────────
+function toolWrite(a: any): Result {
+  const abs = safePath(a.path);
+  if (typeof a.content !== 'string') throw new Error('content must be a string');
+  const existed = fs.existsSync(abs);
+  snapshot(abs);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, a.content);
+  const n = a.content.split('\n').length;
+  return { text: `wrote ${relp(abs)} (${n} lines)`, show: gray(`${existed ? 'rewrote' : 'created'} · ${n} lines · ${kb(Buffer.byteLength(a.content))}`) };
+}
+
+// ─── tools/edit.ts ─────────────────────────────────────────────────────────
+// Where `old` is in `text`: exactly, else line by line ignoring trailing spaces, else ignoring
+// indentation (then `nw` is re-indented to the file's indentation). Saves the model a re-read
+// and a second try when it gets whitespace slightly wrong.
+function locate(text: string, o: string, nw: string, i: number, file: string): { at: number; len: number; nw: string } {
+  const first = text.indexOf(o);
+  if (first >= 0) {
+    if (text.indexOf(o, first + 1) >= 0) throw new Error(`edit #${i}: old text matches several places — add surrounding lines. No changes applied.`);
+    return { at: first, len: o.length, nw };
+  }
+  const trimNl = (s: string) => s.replace(/^\n+|\n+$/g, '');
+  const ol = trimNl(o).split('\n'), lines = text.split('\n');
+  const starts: number[] = [];
+  lines.reduce((p, l) => { starts.push(p); return p + l.length + 1; }, 0);
+  for (const norm of [(s: string) => s.trimEnd(), (s: string) => s.trim()]) {
+    const want = ol.map(norm);
+    const hits: number[] = [];
+    for (let s = 0; s + ol.length <= lines.length; s++) if (want.every((w, j) => norm(lines[s + j]) === w)) hits.push(s);
+    if (hits.length > 1) throw new Error(`edit #${i}: old text matches several places — add surrounding lines. No changes applied.`);
+    if (!hits.length) continue;
+    const s = hits[0], e = s + ol.length - 1;
+    let rep = trimNl(nw);
+    const k = ol.findIndex((l) => l.trim());
+    const have = /^\s*/.exec(lines[s + Math.max(0, k)])![0], gave = /^\s*/.exec(ol[Math.max(0, k)])![0];
+    if (have !== gave) rep = rep.split('\n').map((l) => (l.startsWith(gave) ? have + l.slice(gave.length) : l)).join('\n');
+    return { at: starts[s], len: starts[e] + lines[e].length - starts[s], nw: rep };
+  }
+  throw new Error(`edit #${i}: old text not found in ${file}. Read the file again and copy the text exactly. No changes applied.`);
+}
+
+function toolEdit(a: any): Result {
+  const abs = safePath(a.path);
+  if (!fs.existsSync(abs)) throw new Error(`${a.path} does not exist — use write to create it`);
+  const raw = fs.readFileSync(abs, 'utf8');
+  const crlf = raw.includes('\r\n');
+  let text = crlf ? raw.replace(/\r\n/g, '\n') : raw;
+  const edits = Array.isArray(a.edits) ? a.edits : [a];
+  let plus = 0, minus = 0;
+  for (const [i, e] of edits.entries()) {
+    const o = String(e.old ?? '').replace(/\r\n/g, '\n'), nw = String(e.new ?? '').replace(/\r\n/g, '\n');
+    if (!o) throw new Error(`edit #${i + 1}: old is empty`);
+    const m = locate(text, o, nw, i + 1, a.path);
+    text = text.slice(0, m.at) + m.nw + text.slice(m.at + m.len);
+    minus += o.split('\n').length; plus += nw.split('\n').length;
+  }
+  snapshot(abs);
+  fs.writeFileSync(abs, crlf ? text.replace(/\n/g, '\r\n') : text);
+  return { text: `edited ${relp(abs)}`, show: `${green('+' + plus)} ${red('-' + minus)}` };
+}
+
+// ─── tools/read.ts ─────────────────────────────────────────────────────────
+function toolRead(a: any): Result {
+  const abs = safePath(a.path);
+  const st = fs.statSync(abs);
+  if (st.isDirectory()) {
+    const ents = fs.readdirSync(abs, { withFileTypes: true }).sort((x, y) => Number(y.isDirectory()) - Number(x.isDirectory()) || x.name.localeCompare(y.name));
+    const list = ents.slice(0, 500).map((e) => e.name + (e.isDirectory() ? '/' : '')).join('\n');
+    return { text: (list || '(empty)') + (ents.length > 500 ? `\n… ${ents.length - 500} more` : ''), show: gray(`${ents.length} entries`) };
+  }
+  const buf = fs.readFileSync(abs);
+  if (buf.subarray(0, 8000).includes(0)) return { text: `binary file, ${buf.length} bytes`, show: gray('binary') };
+  const lines = buf.toString('utf8').split('\n');
+  const from = Math.max(1, Number(a.offset) || 1);
+  const limit = Math.max(1, Number(a.limit) || 2000);
+  let body = lines.slice(from - 1, from - 1 + limit).join('\n');
+  if (body.length > 60_000) body = body.slice(0, 60_000) + '\n… [truncated]';
+  const end = Math.min(lines.length, from - 1 + limit);
+  if (end < lines.length) body += `\n… [${lines.length - end} more lines, read with offset=${end + 1}]`;
+  return { text: body, show: gray(from > 1 || end < lines.length ? `lines ${from}-${end} of ${lines.length}` : `${lines.length} lines`) };
 }
 
 // ─── shell/progress.ts ─────────────────────────────────────────────────────
@@ -698,7 +852,7 @@ function finishCard(c: Card, r: Result) {
 
 // ─── tools/shell.ts ────────────────────────────────────────────────────────
 const SHELL = process.env.FA_SHELL || (IS_WIN ? 'powershell' : fs.existsSync('/bin/bash') ? 'bash' : 'sh');
-const MAX_OUT = 30_000;
+const MAX_OUT = 12_000;   // tail kept for the model; long logs are mostly noise
 
 function toolShell(a: any, sig: AbortSignal, card?: Card): Promise<Result> {
   const cmd = String(a.command ?? '');
@@ -730,7 +884,7 @@ function toolShell(a: any, sig: AbortSignal, card?: Card): Promise<Result> {
     const done = (code: number | null, extra = '') => {
       clearTimeout(timer); sig.removeEventListener('abort', kill);
       let o = Buffer.concat(chunks).toString('utf8').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').trimEnd();
-      if (o.length > MAX_OUT) o = `… [${o.length - MAX_OUT} chars cut]\n` + o.slice(-MAX_OUT);
+      if (o.length > MAX_OUT) o = `… [first ${o.length - MAX_OUT} chars cut — narrow the command with grep, head or tail if you need them]\n` + o.slice(-MAX_OUT);
       const status = timedOut ? `killed after ${timeout}s timeout` : sig.aborted ? 'interrupted' : `exit ${code}`;
       const tail = o.split('\n').map((l) => l.split('\r').filter((x) => x.trim()).pop() ?? '').join('\n');
       resolve({ text: `${status}${extra}\n${o}`, err: code !== 0, show: code === 0 ? (o ? '' : gray('no output')) : red(status + extra), tail });
@@ -739,6 +893,331 @@ function toolShell(a: any, sig: AbortSignal, card?: Card): Promise<Result> {
     child.on('close', (code) => done(code));
   });
 }
+
+// ─── shell/parse.ts ────────────────────────────────────────────────────────
+// Turns a raw shell command into a short, readable label:
+//   cd app && npm install express cors 2>&1 | tail -5
+//   → in app · npm install express cors | tail
+// Handles quotes, $( ), redirects, heredocs, &&, ||, |, ; and newlines.
+
+type Tok = { w?: string; op?: string; redir?: string; hd?: boolean };
+
+function shTokens(cmd: string): Tok[] {
+  const t: Tok[] = [];
+  let cur = '', has = false, i = 0, redir = '';
+  const push = () => {
+    if (has) { if (redir) { if (redir !== 'skip') t.push({ redir: cur }); redir = ''; } else t.push({ w: cur }); }
+    cur = ''; has = false;
+  };
+  while (i < cmd.length) {
+    const c = cmd[i], ahead = cmd.slice(i, i + 64);
+    if (c === "'") { const j = cmd.indexOf("'", i + 1); cur += cmd.slice(i + 1, j < 0 ? undefined : j); has = true; i = j < 0 ? cmd.length : j + 1; continue; }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < cmd.length && cmd[j] !== '"') { if (cmd[j] === '\\') j++; j++; }
+      cur += cmd.slice(i + 1, j).replace(/\\(.)/g, '$1'); has = true; i = j + 1; continue;
+    }
+    if (c === '\\' && i + 1 < cmd.length) { if (cmd[i + 1] !== '\n') { cur += cmd[i + 1]; has = true; } i += 2; continue; }
+    if (c === '$' && cmd[i + 1] === '(') {
+      let d = 0, j = i;
+      for (; j < cmd.length; j++) { if (cmd[j] === '(') d++; else if (cmd[j] === ')' && --d === 0) break; }
+      cur += cmd.slice(i, j + 1); has = true; i = j + 1; continue;
+    }
+    if (c === ' ' || c === '\t') { push(); i++; continue; }
+    if (c === '#' && !has) { const j = cmd.indexOf('\n', i); i = j < 0 ? cmd.length : j; continue; }
+    if ('|&;<>\n'.includes(c) || (!has && /^\d+[<>]/.test(ahead))) {
+      push();
+      const hd = /^<<-?[ \t]*(['"]?)([\w.-]+)\1/.exec(ahead);
+      if (hd) {
+        // skip the heredoc body up to its terminator line
+        const nl = cmd.indexOf('\n', i);
+        let end = cmd.length;
+        if (nl >= 0) {
+          const re = new RegExp(`^[ \\t]*${hd[2].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[ \\t]*$`, 'm');
+          const m = re.exec(cmd.slice(nl + 1));
+          if (m) end = nl + 1 + m.index + m[0].length;
+        }
+        // keep whatever follows the marker on the same line (e.g. "> file")
+        const tailLine = cmd.slice(i + hd[0].length, nl < 0 ? cmd.length : nl);
+        t.push({ hd: true });
+        t.push(...shTokens(tailLine).filter((x) => !x.op));
+        i = end; continue;
+      }
+      const dup = /^\d*[<>]&\d+/.exec(ahead);
+      if (dup) { i += dup[0].length; continue; }
+      const here = /^<<</.exec(ahead);
+      if (here) { redir = 'skip'; i += 3; continue; }
+      const rd = /^(&>>?|\d*>>?|\d*<)/.exec(ahead);
+      if (rd) { redir = rd[0].includes('>') ? '>' : 'skip'; i += rd[0].length; continue; }
+      const op = /^(\|\||&&|\|&|;;|[|;&\n])/.exec(ahead)![0];
+      t.push({ op: op === '\n' || op === ';;' ? ';' : op === '|&' ? '|' : op });
+      i += op.length; continue;
+    }
+    cur += c; has = true; i++;
+  }
+  push();
+  return t;
+}
+
+const short = (p: string) => clip(p.replace(/^\.\//, ''), 40);
+const quoted = (s: string) => dim(`"${clip(s.split('\n')[0], 40)}"`);
+const host = (u: string) => { try { const x = new URL(u); return clip(x.host + (x.pathname === '/' ? '' : x.pathname), 50); } catch { return clip(u, 50); } };
+const WRAPPERS = new Set(['sudo', 'time', 'nohup', 'env', 'command', 'exec', 'nice']);
+// pipe stages that only trim or format output — not worth showing
+const NOISE = new Set(['head', 'tail', 'Select-Object', 'select', 'Out-String', 'Out-Null', 'Format-Table', 'ft', 'Format-List', 'fl', 'sort', 'Sort-Object', 'uniq', 'more', 'less', 'cat', 'tee', 'wc']);
+const BODY = new Set(['do', 'then', 'else', '{', '(']);     // prefixes in front of a real command
+const CLOSE = new Set(['done', 'fi', 'esac', '}', ')']);    // block ends: nothing to show
+
+function segLabel(words: string[], out: string, heredoc: boolean): string | null {
+  const ws = [...words];
+  while (ws.length && BODY.has(ws[0])) ws.shift();
+  if (ws.length && CLOSE.has(ws[0])) return null;
+  if (ws[0] === 'for' || ws[0] === 'select') {
+    const inAt = ws.indexOf('in');
+    const items = inAt > 0 ? ws.slice(inAt + 1) : [];
+    return `${bold(ws[0])} ${ws[1] ?? ''}${items.length ? ' in ' + (items.length > 3 ? `${items[0]}…${items[items.length - 1]}` : items.join(' ')) : ''}`;
+  }
+  if (ws[0] === 'while' || ws[0] === 'until' || ws[0] === 'if' || ws[0] === 'elif') {
+    const cond = segLabel(ws.slice(1).filter((x) => x !== '[' && x !== ']' && x !== '!'), '', false);
+    return `${bold(ws[0])} ${cond ?? ''}`;
+  }
+  while (ws.length && /^[A-Za-z_]\w*=/.test(ws[0])) ws.shift();
+  while (ws.length && WRAPPERS.has(ws[0])) ws.shift();
+  if (!ws.length) return out ? `${bold('write')} ${short(out)}` : null;
+  const prog = ws[0].split(/[\\/]/).pop()!.replace(/\.(exe|cmd|bat)$/i, '');
+  const a = ws.slice(1), pos = a.filter((x) => !x.startsWith('-'));
+  const P = bold(prog);
+  const to = out ? ` ${gray('→')} ${short(out)}` : '';
+  const list = (xs: string[], n = 3) => xs.slice(0, n).map(short).join(' ') + (xs.length > n ? gray(` +${xs.length - n}`) : '');
+  switch (prog) {
+    case 'git': {
+      const sub = pos[0] ?? '';
+      if (sub === 'commit') {
+        const mi = a.findIndex((x) => /^-[a-z]*m$/.test(x) || x === '--message');
+        return `${P} commit${mi >= 0 && a[mi + 1] ? ' ' + quoted(a[mi + 1]) : ''}`;
+      }
+      if (sub === 'clone') return `${P} clone ${host(pos[1] ?? '')}`;
+      return `${P} ${list(pos, 3)}${to}`;
+    }
+    case 'npm': case 'pnpm': case 'yarn': case 'bun': case 'pip': case 'pip3': case 'uv': case 'cargo': case 'go': case 'composer': case 'gem': {
+      const sub = pos[0] ?? (prog === 'yarn' ? 'install' : '');
+      if (/^(i|install|add|ci)$/.test(sub)) return `${P} install${pos.length > 1 ? ' ' + list(pos.slice(1), 4) : ''}`;
+      if (sub === 'run' || sub === 'run-script') return `${P} run ${pos[1] ?? ''}`;
+      if (sub === 'pip' && pos[1] === 'install') return `${P} pip install ${list(pos.slice(2), 4)}`;
+      return `${P} ${pos.length ? list(pos, 3) : a.slice(0, 2).join(' ')}${to}`;
+    }
+    case 'npx': case 'bunx': case 'pnpx': return `${P} ${list(pos, 2)}`;
+    case 'curl': case 'wget': case 'Invoke-WebRequest': case 'iwr': {
+      const u = a.find((x) => /^https?:\/\//.test(x));
+      return `${P} ${u ? host(u) : ''}${to}`;
+    }
+    case 'cat': case 'type': case 'Get-Content': case 'gc':
+      if (out) return `${bold('write')} ${short(out)}${heredoc ? gray(' (heredoc)') : ''}`;
+      return `${bold('read')} ${list(pos)}`;
+    case 'head': case 'tail': case 'less': case 'more': case 'wc':
+      return pos.length ? `${P} ${list(pos)}` : P;
+    case 'echo': case 'printf': case 'Write-Output':
+      return out ? `${bold('write')} ${short(out)}` : `${P} ${quoted(a.join(' '))}`;
+    case 'tee': return `${bold('write')} ${list(pos)}`;
+    case 'rm': case 'del': case 'Remove-Item': case 'rmdir': return `${bold('delete')} ${list(pos)}`;
+    case 'mkdir': case 'md': case 'touch': return `${P} ${list(pos)}`;
+    case 'mv': case 'cp': case 'move': case 'copy': case 'Copy-Item': case 'Move-Item':
+      return pos.length >= 2 ? `${P} ${list(pos.slice(0, -1), 2)} ${gray('→')} ${short(pos[pos.length - 1])}` : `${P} ${list(pos)}`;
+    case 'grep': case 'rg': case 'ag': case 'findstr': case 'Select-String': {
+      const pi = a.findIndex((x) => x === '-e' || x === '--regexp');
+      const pat = pi >= 0 ? a[pi + 1] : pos[0];
+      const rest = pi >= 0 ? pos : pos.slice(1);
+      return `${bold('search')} ${quoted(pat ?? '')}${rest.length ? ' in ' + list(rest, 2) : ''}`;
+    }
+    case 'find': case 'fd': {
+      const ni = a.findIndex((x) => x === '-name' || x === '-iname');
+      return `${bold('find')} ${ni >= 0 ? quoted(a[ni + 1] ?? '') + ' in ' : ''}${short(pos[0] ?? '.')}`;
+    }
+    case 'ls': case 'dir': case 'Get-ChildItem': case 'gci': case 'tree': return `${bold('list')} ${pos.length ? list(pos) : '.'}`;
+    case 'sed': return a.some((x) => /^-i/.test(x)) ? `${bold('edit')} ${short(pos[pos.length - 1] ?? '')}` : `${P} ${list(pos.slice(1), 2)}`;
+    case 'python': case 'python3': case 'py': case 'node': case 'deno': case 'ruby': case 'perl': case 'php': {
+      if (a[0] === '-c' || a[0] === '-e') return `${P} ${gray('-c')} ${quoted(a[1] ?? '')}`;
+      if (a[0] === '-m') return `${P} -m ${list(a.slice(1), 3)}`;
+      return `${P}${pos.length ? ' ' + list(pos, 3) : a.length ? ' ' + a.slice(0, 2).join(' ') : ''}${to}`;
+    }
+    case 'cd': case 'pushd': case 'Set-Location': return null;
+    case 'true': case ':': return null;
+    default: return `${P}${pos.length ? ' ' + list(pos, 3) : a.length ? ' ' + a.slice(0, 2).join(' ') : ''}${to}`;
+  }
+}
+
+function shellLabel(cmd: string): string {
+  const first = cmd.trim().split('\n')[0];
+  if (/^(case|function)\b/.test(first)) return clip(first, 80);
+  let toks: Tok[];
+  try { toks = shTokens(cmd); } catch { return clip(first, 80); }
+  const parts: string[] = [];
+  let seg: string[] = [], out = '', hd = false, joiner = '', cdDir = '';
+  const flush = (op: string) => {
+    if (seg.length || out) {
+      if ((seg[0] === 'cd' || seg[0] === 'pushd' || seg[0] === 'Set-Location') && !parts.length) cdDir = seg[1] ?? '~';
+      else if (!(joiner === ' | ' && parts.length && NOISE.has((seg[0] ?? '').split(/[\\/]/).pop()!) && !out)) {
+        const l = segLabel(seg, out, hd);
+        if (l) parts.push((parts.length ? gray(joiner) : '') + l);
+      }
+    }
+    seg = []; out = ''; hd = false;
+    joiner = op === '|' ? ' | ' : op === '&&' ? ' → ' : op === '||' ? ' || ' : op === '&' ? ' & ' : ' ; ';
+  };
+  for (const t of toks) {
+    if (t.w !== undefined) seg.push(t.w);
+    else if (t.redir !== undefined) out = t.redir;
+    else if (t.hd) hd = true;
+    else if (t.op) flush(t.op);
+  }
+  flush('');
+  const label = parts.join('') || clip(first, 80);
+  return (cdDir ? gray(`in ${short(cdDir)} · `) : '') + label;
+}
+
+// ─── tools/index.ts ────────────────────────────────────────────────────────
+// Tool schemas sent to the model, dispatch, and parallel execution.
+
+const TOOLS = [
+  {
+    name: 'write',
+    description: 'Create or overwrite a file with its complete content. Parent folders are created automatically.',
+    schema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] },
+  },
+  {
+    name: 'edit',
+    description: 'Replace exact text in an existing file. Each `old` must occur exactly once. Put all changes to one file into a single call.',
+    schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        edits: { type: 'array', items: { type: 'object', properties: { old: { type: 'string' }, new: { type: 'string' } }, required: ['old', 'new'] } },
+      },
+      required: ['path', 'edits'],
+    },
+  },
+  {
+    name: 'read',
+    description: 'Read a text file (optionally a line range) or list a directory.',
+    schema: {
+      type: 'object',
+      properties: { path: { type: 'string' }, offset: { type: 'integer', description: 'first line, 1-based' }, limit: { type: 'integer' } },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'shell',
+    description: `Run a ${SHELL} command in the working directory (non-interactive, no stdin). Returns exit code and output tail.`,
+    schema: { type: 'object', properties: { command: { type: 'string' }, timeout: { type: 'integer', description: 'seconds, default 120' } }, required: ['command'] },
+  },
+];
+
+const VERB: Record<string, string> = { write: 'Write', edit: 'Update', read: 'Read' };
+
+function describe(c: Call) {
+  const a = c.args || {};
+  if (c.name === 'shell') return `${accent2('$')} ${shellLabel(String(a.command ?? ''))}`;
+  return `${bold(VERB[c.name] || c.name)} ${a.path ?? ''}`;
+}
+
+async function runTool(c: Call, sig: AbortSignal, card: Card): Promise<Result> {
+  if (sig.aborted) return { text: 'not run: interrupted by user', err: true, show: yellow('skipped') };
+  if (c.bad) return { text: c.bad, err: true, show: c.bad };
+  try {
+    switch (c.name) {
+      case 'write': return toolWrite(c.args);
+      case 'edit': return toolEdit(c.args);
+      case 'read': return toolRead(c.args);
+      case 'shell':
+        if (cfg.safe && !(await confirm(`Run this command?\n\n${String(c.args.command)}`, 'Run it', 'Skip')))
+          return { text: 'user declined to run this command', err: true, show: yellow('declined') };
+        return await toolShell(c.args, sig, card);
+      default: throw new Error(`unknown tool ${c.name}`);
+    }
+  } catch (e: any) {
+    return { text: `error: ${e.message}`, err: true, show: red(e.message) };
+  }
+}
+
+// Calls touching the same file run in order; everything else runs in parallel.
+async function runTools(calls: Call[], sig: AbortSignal): Promise<Result[]> {
+  const results: Result[] = new Array(calls.length);
+  const groups = new Map<string, number[]>();
+  calls.forEach((c, i) => {
+    const k = c.name === 'shell' ? `$${i}` : (() => { try { return safePath(c.args?.path); } catch { return `?${i}`; } })();
+    groups.set(k, [...(groups.get(k) || []), i]);
+  });
+  await Promise.all([...groups.values()].map(async (idx) => {
+    for (const i of idx) {
+      const card = newCard(describe(calls[i]));
+      results[i] = await runTool(calls[i], sig, card);
+      finishCard(card, results[i]);
+    }
+  }));
+  return results;
+}
+
+// ─── session.ts ────────────────────────────────────────────────────────────
+// Conversations are saved per working directory in ~/.fa/sessions, so `fa -c` or /resume
+// can pick one up again. Files older than 30 days are removed.
+
+const DIR = path.join(CFG_DIR, 'sessions');
+const TAG = crypto.createHash('sha256').update(ROOT).digest('hex').slice(0, 10);
+const sess = { id: '' };
+
+interface Saved { root: string; title: string; updated: number; history: Msg[] }
+
+function newSession() { sess.id = `${Date.now()}-${TAG}`; }
+
+function saveSession() {
+  if (!conv.history.length) return;
+  if (!sess.id) newSession();
+  const first = conv.history.find((m) => m.role === 'user')?.text || '';
+  const s: Saved = { root: ROOT, title: first.replace(/\s+/g, ' ').trim().slice(0, 80), updated: Date.now(), history: conv.history };
+  try {
+    fs.mkdirSync(DIR, { recursive: true });
+    fs.writeFileSync(path.join(DIR, sess.id + '.json'), JSON.stringify(s), { mode: 0o600 });
+  } catch {}
+}
+
+// sessions of this directory, newest first
+function listSessions(): { id: string; title: string; updated: number; turns: number }[] {
+  let names: string[] = [];
+  try { names = fs.readdirSync(DIR); } catch { return []; }
+  const out = [];
+  for (const n of names) {
+    const f = path.join(DIR, n);
+    try {
+      if (Date.now() - fs.statSync(f).mtimeMs > 30 * 86400_000) { fs.unlinkSync(f); continue; }
+      if (!n.endsWith(`-${TAG}.json`)) continue;
+      const s: Saved = JSON.parse(fs.readFileSync(f, 'utf8'));
+      out.push({ id: n.slice(0, -5), title: s.title, updated: s.updated, turns: s.history.filter((m) => m.role === 'user').length });
+    } catch {}
+  }
+  return out.sort((a, b) => b.updated - a.updated);
+}
+
+// load a session into the conversation and show what was said
+function loadSession(id: string, quiet = false): boolean {
+  let s: Saved;
+  try { s = JSON.parse(fs.readFileSync(path.join(DIR, id + '.json'), 'utf8')); } catch { return false; }
+  conv.history = s.history; sess.id = id;
+  if (quiet) return true;
+  for (const m of s.history) {
+    if (m.role === 'user') { if (m.text.startsWith('[')) continue; gap(); line(m.text.trim(), { mark: accent('› '), ind: 2, kind: 'user' }); }
+    else if (m.role === 'assistant') {
+      for (const c of m.calls) line(describe(c), { mark: gray('· '), ind: 2, kind: 'tool', clip: true });
+      if (m.text.trim()) { gap(); line(m.text.trim(), { md: true, mark: accent('● '), ind: 2, kind: 'text' }); }
+    }
+  }
+  gap(); line(gray(`resumed · ${s.history.filter((m) => m.role === 'user').length} messages`), { ind: 2 });
+  return true;
+}
+
+const ago = (t: number) => {
+  const m = Math.round((Date.now() - t) / 60000);
+  return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`;
+};
 
 // ─── prompt.ts ─────────────────────────────────────────────────────────────
 // System prompt: pi's tool rules + strict scope (do exactly what was asked) + speed rules.
@@ -750,6 +1229,7 @@ function systemPrompt() {
     listing = ents.slice(0, 80).map((e) => e.name + (e.isDirectory() ? '/' : '')).join('  ') + (ents.length > 80 ? `  … +${ents.length - 80}` : '');
   } catch {}
   const ctx: string[] = [];
+  try { const t = fs.readFileSync(path.join(CFG_DIR, 'AGENTS.md'), 'utf8').trim().slice(0, 16_000); if (t) ctx.push(`<user_instructions path="~/.fa/AGENTS.md">\n${t}\n</user_instructions>`); } catch {}
   for (const f of ['AGENTS.md', 'CLAUDE.md']) {
     try { const t = fs.readFileSync(path.join(ROOT, f), 'utf8').trim().slice(0, 16_000); if (t) ctx.push(`<project_instructions path="${f}">\n${t}\n</project_instructions>`); } catch {}
   }
@@ -765,7 +1245,7 @@ function systemPrompt() {
 The user's words are the spec. Their instructions, then the project instructions below, override everything else here.
 - Do what the user asked — and only that. Scope is about WHAT you touch, never about how well you do it.
 - Use exactly the names, paths, languages, libraries and approach the user gave; if they said how to do it, do it that way.
-- Do not test, build, lint, type-check, run or "verify" anything unless the user or the project instructions ask for it.
+- Do not test, build, lint, type-check, run or "verify" anything unless the user or the project instructions ask for it. One exception: after fixing a bug, if the project has an obvious quick check (an existing test or build command), run it once.
 - Do not create files nobody asked for: no README, tests, configs, examples, docs, scripts, backups.
 - Do not touch unrelated code, files or formatting; no refactors, renames or new dependencies nobody asked for.
 - A question gets an answer, not file changes. A request to explain or review does not change files.
@@ -792,30 +1272,8 @@ Inside that scope, deliver the best result you can — complete, polished, produ
 - Be concise. Show file paths clearly when you mention files.
 - When done: one short sentence on what changed. No feature lists, no headings, no next steps, no suggestions.
 - Reply in the user's language.
-${ctx.length ? `\n# Project instructions\n${ctx.join('\n\n')}\n` : ''}
+${ctx.length ? `\n# User and project instructions\n${ctx.join('\n\n')}\n` : ''}
 Working directory: ${listing || '(empty)'}`;
-}
-
-// ─── tools/sandbox.ts ──────────────────────────────────────────────────────
-// Every file tool is locked inside ROOT; changed files are snapshotted for /undo.
-
-function safePath(p: string): string {
-  if (typeof p !== 'string' || !p) throw new Error('path is required');
-  const abs = path.resolve(ROOT, p);
-  let real = abs, probe = abs;
-  while (!fs.existsSync(probe)) { const up = path.dirname(probe); if (up === probe) break; probe = up; }
-  try { real = path.join(fs.realpathSync(probe), path.relative(probe, abs)); } catch {}
-  const rel = path.relative(ROOT, real);
-  if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(`access denied: ${p} is outside the working directory`);
-  return abs;
-}
-const relp = (abs: string) => path.relative(ROOT, abs).split(path.sep).join('/') || '.';
-
-// one map per request: file → content before the request (null = did not exist)
-const undoStack: Map<string, Buffer | null>[] = [];
-function snapshot(abs: string) {
-  const top = undoStack[undoStack.length - 1];
-  if (top && !top.has(abs)) top.set(abs, fs.existsSync(abs) ? fs.readFileSync(abs) : null);
 }
 
 // ─── api/http.ts ───────────────────────────────────────────────────────────
@@ -1173,6 +1631,8 @@ const COMMANDS: [string, string][] = [
   ['/safe', 'ask before every shell command'],
   ['/undo', 'revert file changes from the last request'],
   ['/clear', 'start a new conversation'],
+  ['/resume', 'continue an earlier conversation in this directory'],
+  ['/compact', 'drop old tool output to free context'],
   ['/update', 'update fa to the latest version'],
   ['/help', 'commands and keys'],
   ['/exit', 'quit'],
@@ -1188,14 +1648,30 @@ async function command(input: string): Promise<boolean> {
     case '/help': case '/?':
       gap();
       for (const [c, d] of COMMANDS) line(`${pad(accent(c), 11)} ${d}`, { ind: 2 });
-      line(gray('Esc stops the agent · Enter while it works queues a message · Ctrl+J or \\+Enter = new line'), { ind: 2 });
+      line(gray('!command runs a shell command yourself · Esc stops the agent · Enter while it works queues a message · Ctrl+J or \\+Enter = new line'), { ind: 2 });
       line(gray('↑↓ history · Tab completes a command · mouse wheel, PgUp/PgDn or Shift+↑↓ scroll · Shift+drag selects text · Ctrl+L redraw · Ctrl+C ×2 quit'), { ind: 2 });
       break;
     case '/clear': case '/new':
-      conv.history = []; conv.system = systemPrompt(); usage.in = usage.out = usage.cache = 0;
+      conv.history = []; conv.system = systemPrompt(); usage.in = usage.out = usage.cache = usage.last = 0; newSession();
       log.length = 0; ui.scroll = 0; banner();
       line(gray('new conversation'), { ind: 2 });
       break;
+    case '/resume': case '/continue': {
+      const list = listSessions();
+      if (!list.length) { line(gray('no earlier conversations in this directory'), { ind: 2 }); break; }
+      const id = await pick({ title: 'Resume a conversation' },
+        list.map((s) => ({ value: s.id, label: s.title || '(empty)', hint: `${ago(s.updated)} · ${s.turns} msg` })));
+      if (!id) break;
+      conv.system = systemPrompt(); usage.last = 0;
+      log.length = 0; ui.scroll = 0; banner();
+      if (!loadSession(id)) line(red('could not read that conversation'), { ind: 2 });
+      break;
+    }
+    case '/compact': {
+      const cut = prune(2);
+      ok(cut ? `old tool output removed · ~${kt(Math.round(cut / 4))} tokens freed` : 'nothing to compact');
+      break;
+    }
     case '/model': case '/m': await chooseModel(arg); break;
     case '/models': await manageModels(); break;
     case '/setup': await setup(); break;
@@ -1388,7 +1864,7 @@ function suggestions(): [string, string][] {
 function inputView(tw: number): { rows: string[]; cur: [number, number] } {
   const busy = !!agent.ctrl;
   const prompt = busy ? gray('› ') : accent('› ');
-  if (!editor.chars.length) return { rows: [prompt + gray(busy ? 'type to queue a message…' : 'Ask anything · / for commands')], cur: [0, 2] };
+  if (!editor.chars.length) return { rows: [prompt + gray(busy ? 'type to queue a message…' : 'Ask anything · / for commands · ! for shell')], cur: [0, 2] };
   const cw = Math.max(4, tw - 2);
   const segs: { s: string[]; start: number }[] = [];
   let seg = { s: [] as string[], start: 0 }, n = 0;
@@ -1410,187 +1886,6 @@ function inputView(tw: number): { rows: string[]; cur: [number, number] } {
 function onKey(s: string | undefined, k: Key) {
   if (M.modal) return M.modal.key(s, k);
   editor.key(s, k);
-}
-
-// ─── shell/parse.ts ────────────────────────────────────────────────────────
-// Turns a raw shell command into a short, readable label:
-//   cd app && npm install express cors 2>&1 | tail -5
-//   → in app · npm install express cors | tail
-// Handles quotes, $( ), redirects, heredocs, &&, ||, |, ; and newlines.
-
-type Tok = { w?: string; op?: string; redir?: string; hd?: boolean };
-
-function shTokens(cmd: string): Tok[] {
-  const t: Tok[] = [];
-  let cur = '', has = false, i = 0, redir = '';
-  const push = () => {
-    if (has) { if (redir) { if (redir !== 'skip') t.push({ redir: cur }); redir = ''; } else t.push({ w: cur }); }
-    cur = ''; has = false;
-  };
-  while (i < cmd.length) {
-    const c = cmd[i], ahead = cmd.slice(i, i + 64);
-    if (c === "'") { const j = cmd.indexOf("'", i + 1); cur += cmd.slice(i + 1, j < 0 ? undefined : j); has = true; i = j < 0 ? cmd.length : j + 1; continue; }
-    if (c === '"') {
-      let j = i + 1;
-      while (j < cmd.length && cmd[j] !== '"') { if (cmd[j] === '\\') j++; j++; }
-      cur += cmd.slice(i + 1, j).replace(/\\(.)/g, '$1'); has = true; i = j + 1; continue;
-    }
-    if (c === '\\' && i + 1 < cmd.length) { if (cmd[i + 1] !== '\n') { cur += cmd[i + 1]; has = true; } i += 2; continue; }
-    if (c === '$' && cmd[i + 1] === '(') {
-      let d = 0, j = i;
-      for (; j < cmd.length; j++) { if (cmd[j] === '(') d++; else if (cmd[j] === ')' && --d === 0) break; }
-      cur += cmd.slice(i, j + 1); has = true; i = j + 1; continue;
-    }
-    if (c === ' ' || c === '\t') { push(); i++; continue; }
-    if (c === '#' && !has) { const j = cmd.indexOf('\n', i); i = j < 0 ? cmd.length : j; continue; }
-    if ('|&;<>\n'.includes(c) || (!has && /^\d+[<>]/.test(ahead))) {
-      push();
-      const hd = /^<<-?[ \t]*(['"]?)([\w.-]+)\1/.exec(ahead);
-      if (hd) {
-        // skip the heredoc body up to its terminator line
-        const nl = cmd.indexOf('\n', i);
-        let end = cmd.length;
-        if (nl >= 0) {
-          const re = new RegExp(`^[ \\t]*${hd[2].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[ \\t]*$`, 'm');
-          const m = re.exec(cmd.slice(nl + 1));
-          if (m) end = nl + 1 + m.index + m[0].length;
-        }
-        // keep whatever follows the marker on the same line (e.g. "> file")
-        const tailLine = cmd.slice(i + hd[0].length, nl < 0 ? cmd.length : nl);
-        t.push({ hd: true });
-        t.push(...shTokens(tailLine).filter((x) => !x.op));
-        i = end; continue;
-      }
-      const dup = /^\d*[<>]&\d+/.exec(ahead);
-      if (dup) { i += dup[0].length; continue; }
-      const here = /^<<</.exec(ahead);
-      if (here) { redir = 'skip'; i += 3; continue; }
-      const rd = /^(&>>?|\d*>>?|\d*<)/.exec(ahead);
-      if (rd) { redir = rd[0].includes('>') ? '>' : 'skip'; i += rd[0].length; continue; }
-      const op = /^(\|\||&&|\|&|;;|[|;&\n])/.exec(ahead)![0];
-      t.push({ op: op === '\n' || op === ';;' ? ';' : op === '|&' ? '|' : op });
-      i += op.length; continue;
-    }
-    cur += c; has = true; i++;
-  }
-  push();
-  return t;
-}
-
-const short = (p: string) => clip(p.replace(/^\.\//, ''), 40);
-const quoted = (s: string) => dim(`"${clip(s.split('\n')[0], 40)}"`);
-const host = (u: string) => { try { const x = new URL(u); return clip(x.host + (x.pathname === '/' ? '' : x.pathname), 50); } catch { return clip(u, 50); } };
-const WRAPPERS = new Set(['sudo', 'time', 'nohup', 'env', 'command', 'exec', 'nice']);
-// pipe stages that only trim or format output — not worth showing
-const NOISE = new Set(['head', 'tail', 'Select-Object', 'select', 'Out-String', 'Out-Null', 'Format-Table', 'ft', 'Format-List', 'fl', 'sort', 'Sort-Object', 'uniq', 'more', 'less', 'cat', 'tee', 'wc']);
-const BODY = new Set(['do', 'then', 'else', '{', '(']);     // prefixes in front of a real command
-const CLOSE = new Set(['done', 'fi', 'esac', '}', ')']);    // block ends: nothing to show
-
-function segLabel(words: string[], out: string, heredoc: boolean): string | null {
-  const ws = [...words];
-  while (ws.length && BODY.has(ws[0])) ws.shift();
-  if (ws.length && CLOSE.has(ws[0])) return null;
-  if (ws[0] === 'for' || ws[0] === 'select') {
-    const inAt = ws.indexOf('in');
-    const items = inAt > 0 ? ws.slice(inAt + 1) : [];
-    return `${bold(ws[0])} ${ws[1] ?? ''}${items.length ? ' in ' + (items.length > 3 ? `${items[0]}…${items[items.length - 1]}` : items.join(' ')) : ''}`;
-  }
-  if (ws[0] === 'while' || ws[0] === 'until' || ws[0] === 'if' || ws[0] === 'elif') {
-    const cond = segLabel(ws.slice(1).filter((x) => x !== '[' && x !== ']' && x !== '!'), '', false);
-    return `${bold(ws[0])} ${cond ?? ''}`;
-  }
-  while (ws.length && /^[A-Za-z_]\w*=/.test(ws[0])) ws.shift();
-  while (ws.length && WRAPPERS.has(ws[0])) ws.shift();
-  if (!ws.length) return out ? `${bold('write')} ${short(out)}` : null;
-  const prog = ws[0].split(/[\\/]/).pop()!.replace(/\.(exe|cmd|bat)$/i, '');
-  const a = ws.slice(1), pos = a.filter((x) => !x.startsWith('-'));
-  const P = bold(prog);
-  const to = out ? ` ${gray('→')} ${short(out)}` : '';
-  const list = (xs: string[], n = 3) => xs.slice(0, n).map(short).join(' ') + (xs.length > n ? gray(` +${xs.length - n}`) : '');
-  switch (prog) {
-    case 'git': {
-      const sub = pos[0] ?? '';
-      if (sub === 'commit') {
-        const mi = a.findIndex((x) => /^-[a-z]*m$/.test(x) || x === '--message');
-        return `${P} commit${mi >= 0 && a[mi + 1] ? ' ' + quoted(a[mi + 1]) : ''}`;
-      }
-      if (sub === 'clone') return `${P} clone ${host(pos[1] ?? '')}`;
-      return `${P} ${list(pos, 3)}${to}`;
-    }
-    case 'npm': case 'pnpm': case 'yarn': case 'bun': case 'pip': case 'pip3': case 'uv': case 'cargo': case 'go': case 'composer': case 'gem': {
-      const sub = pos[0] ?? (prog === 'yarn' ? 'install' : '');
-      if (/^(i|install|add|ci)$/.test(sub)) return `${P} install${pos.length > 1 ? ' ' + list(pos.slice(1), 4) : ''}`;
-      if (sub === 'run' || sub === 'run-script') return `${P} run ${pos[1] ?? ''}`;
-      if (sub === 'pip' && pos[1] === 'install') return `${P} pip install ${list(pos.slice(2), 4)}`;
-      return `${P} ${pos.length ? list(pos, 3) : a.slice(0, 2).join(' ')}${to}`;
-    }
-    case 'npx': case 'bunx': case 'pnpx': return `${P} ${list(pos, 2)}`;
-    case 'curl': case 'wget': case 'Invoke-WebRequest': case 'iwr': {
-      const u = a.find((x) => /^https?:\/\//.test(x));
-      return `${P} ${u ? host(u) : ''}${to}`;
-    }
-    case 'cat': case 'type': case 'Get-Content': case 'gc':
-      if (out) return `${bold('write')} ${short(out)}${heredoc ? gray(' (heredoc)') : ''}`;
-      return `${bold('read')} ${list(pos)}`;
-    case 'head': case 'tail': case 'less': case 'more': case 'wc':
-      return pos.length ? `${P} ${list(pos)}` : P;
-    case 'echo': case 'printf': case 'Write-Output':
-      return out ? `${bold('write')} ${short(out)}` : `${P} ${quoted(a.join(' '))}`;
-    case 'tee': return `${bold('write')} ${list(pos)}`;
-    case 'rm': case 'del': case 'Remove-Item': case 'rmdir': return `${bold('delete')} ${list(pos)}`;
-    case 'mkdir': case 'md': case 'touch': return `${P} ${list(pos)}`;
-    case 'mv': case 'cp': case 'move': case 'copy': case 'Copy-Item': case 'Move-Item':
-      return pos.length >= 2 ? `${P} ${list(pos.slice(0, -1), 2)} ${gray('→')} ${short(pos[pos.length - 1])}` : `${P} ${list(pos)}`;
-    case 'grep': case 'rg': case 'ag': case 'findstr': case 'Select-String': {
-      const pi = a.findIndex((x) => x === '-e' || x === '--regexp');
-      const pat = pi >= 0 ? a[pi + 1] : pos[0];
-      const rest = pi >= 0 ? pos : pos.slice(1);
-      return `${bold('search')} ${quoted(pat ?? '')}${rest.length ? ' in ' + list(rest, 2) : ''}`;
-    }
-    case 'find': case 'fd': {
-      const ni = a.findIndex((x) => x === '-name' || x === '-iname');
-      return `${bold('find')} ${ni >= 0 ? quoted(a[ni + 1] ?? '') + ' in ' : ''}${short(pos[0] ?? '.')}`;
-    }
-    case 'ls': case 'dir': case 'Get-ChildItem': case 'gci': case 'tree': return `${bold('list')} ${pos.length ? list(pos) : '.'}`;
-    case 'sed': return a.some((x) => /^-i/.test(x)) ? `${bold('edit')} ${short(pos[pos.length - 1] ?? '')}` : `${P} ${list(pos.slice(1), 2)}`;
-    case 'python': case 'python3': case 'py': case 'node': case 'deno': case 'ruby': case 'perl': case 'php': {
-      if (a[0] === '-c' || a[0] === '-e') return `${P} ${gray('-c')} ${quoted(a[1] ?? '')}`;
-      if (a[0] === '-m') return `${P} -m ${list(a.slice(1), 3)}`;
-      return `${P}${pos.length ? ' ' + list(pos, 3) : a.length ? ' ' + a.slice(0, 2).join(' ') : ''}${to}`;
-    }
-    case 'cd': case 'pushd': case 'Set-Location': return null;
-    case 'true': case ':': return null;
-    default: return `${P}${pos.length ? ' ' + list(pos, 3) : a.length ? ' ' + a.slice(0, 2).join(' ') : ''}${to}`;
-  }
-}
-
-function shellLabel(cmd: string): string {
-  const first = cmd.trim().split('\n')[0];
-  if (/^(case|function)\b/.test(first)) return clip(first, 80);
-  let toks: Tok[];
-  try { toks = shTokens(cmd); } catch { return clip(first, 80); }
-  const parts: string[] = [];
-  let seg: string[] = [], out = '', hd = false, joiner = '', cdDir = '';
-  const flush = (op: string) => {
-    if (seg.length || out) {
-      if ((seg[0] === 'cd' || seg[0] === 'pushd' || seg[0] === 'Set-Location') && !parts.length) cdDir = seg[1] ?? '~';
-      else if (!(joiner === ' | ' && parts.length && NOISE.has((seg[0] ?? '').split(/[\\/]/).pop()!) && !out)) {
-        const l = segLabel(seg, out, hd);
-        if (l) parts.push((parts.length ? gray(joiner) : '') + l);
-      }
-    }
-    seg = []; out = ''; hd = false;
-    joiner = op === '|' ? ' | ' : op === '&&' ? ' → ' : op === '||' ? ' || ' : op === '&' ? ' & ' : ' ; ';
-  };
-  for (const t of toks) {
-    if (t.w !== undefined) seg.push(t.w);
-    else if (t.redir !== undefined) out = t.redir;
-    else if (t.hd) hd = true;
-    else if (t.op) flush(t.op);
-  }
-  flush('');
-  const label = parts.join('') || clip(first, 80);
-  return (cdDir ? gray(`in ${short(cdDir)} · `) : '') + label;
 }
 
 // ─── ui/draft.ts ───────────────────────────────────────────────────────────
@@ -1737,7 +2032,7 @@ function footer(W: number): string {
   else if (agent.ctrl) left = gray('esc interrupt · enter queues a message');
   else left = gray('/ commands · ↑↓ history · wheel/PgUp scroll');
   const upd = cfg.latest && cmpVer(cfg.latest, VERSION) > 0 ? yellow(`↑ ${cfg.latest} · /update`) + gray(' · ') : '';
-  const right = upd + gray(`${modelLabel()} · ${cfg.effort}${cfg.fast ? ' · fast' : ''}${cfg.safe ? ' · safe' : ''}`);
+  const right = upd + gray(`${usage.last ? `ctx ${kt(usage.last)} · ` : ''}${modelLabel()} · ${cfg.effort}${cfg.fast ? ' · fast' : ''}${cfg.safe ? ' · safe' : ''}`);
   const sp = W - vw(left) - vw(right);
   return sp >= 2 ? left + ' '.repeat(sp) + right : fit(left, W);
 }
@@ -1881,142 +2176,20 @@ const spin = {
   },
 };
 
-// ─── tools/write.ts ────────────────────────────────────────────────────────
-function toolWrite(a: any): Result {
-  const abs = safePath(a.path);
-  if (typeof a.content !== 'string') throw new Error('content must be a string');
-  const existed = fs.existsSync(abs);
-  snapshot(abs);
-  fs.mkdirSync(path.dirname(abs), { recursive: true });
-  fs.writeFileSync(abs, a.content);
-  const n = a.content.split('\n').length;
-  return { text: `wrote ${relp(abs)} (${n} lines)`, show: gray(`${existed ? 'rewrote' : 'created'} · ${n} lines · ${kb(Buffer.byteLength(a.content))}`) };
-}
+// ─── agent/bang.ts ─────────────────────────────────────────────────────────
+// "!command" in the input box: run it yourself, without the model. The output goes into the
+// conversation, so the next request can refer to it.
 
-// ─── tools/edit.ts ─────────────────────────────────────────────────────────
-function toolEdit(a: any): Result {
-  const abs = safePath(a.path);
-  if (!fs.existsSync(abs)) throw new Error(`${a.path} does not exist — use write to create it`);
-  const raw = fs.readFileSync(abs, 'utf8');
-  const crlf = raw.includes('\r\n');
-  let text = crlf ? raw.replace(/\r\n/g, '\n') : raw;
-  const edits = Array.isArray(a.edits) ? a.edits : [a];
-  let plus = 0, minus = 0;
-  for (const [i, e] of edits.entries()) {
-    const o = String(e.old ?? '').replace(/\r\n/g, '\n'), nw = String(e.new ?? '').replace(/\r\n/g, '\n');
-    if (!o) throw new Error(`edit #${i + 1}: old is empty`);
-    const first = text.indexOf(o);
-    if (first < 0) throw new Error(`edit #${i + 1}: old text not found in ${a.path} (must match exactly, including whitespace). No changes applied.`);
-    if (text.indexOf(o, first + 1) >= 0) throw new Error(`edit #${i + 1}: old text matches several places — add surrounding lines. No changes applied.`);
-    text = text.slice(0, first) + nw + text.slice(first + o.length);
-    minus += o.split('\n').length; plus += nw.split('\n').length;
-  }
-  snapshot(abs);
-  fs.writeFileSync(abs, crlf ? text.replace(/\n/g, '\r\n') : text);
-  return { text: `edited ${relp(abs)}`, show: `${green('+' + plus)} ${red('-' + minus)}` };
-}
-
-// ─── tools/read.ts ─────────────────────────────────────────────────────────
-function toolRead(a: any): Result {
-  const abs = safePath(a.path);
-  const st = fs.statSync(abs);
-  if (st.isDirectory()) {
-    const ents = fs.readdirSync(abs, { withFileTypes: true }).sort((x, y) => Number(y.isDirectory()) - Number(x.isDirectory()) || x.name.localeCompare(y.name));
-    const list = ents.slice(0, 500).map((e) => e.name + (e.isDirectory() ? '/' : '')).join('\n');
-    return { text: (list || '(empty)') + (ents.length > 500 ? `\n… ${ents.length - 500} more` : ''), show: gray(`${ents.length} entries`) };
-  }
-  const buf = fs.readFileSync(abs);
-  if (buf.subarray(0, 8000).includes(0)) return { text: `binary file, ${buf.length} bytes`, show: gray('binary') };
-  const lines = buf.toString('utf8').split('\n');
-  const from = Math.max(1, Number(a.offset) || 1);
-  const limit = Math.max(1, Number(a.limit) || 2000);
-  let body = lines.slice(from - 1, from - 1 + limit).join('\n');
-  if (body.length > 60_000) body = body.slice(0, 60_000) + '\n… [truncated]';
-  const end = Math.min(lines.length, from - 1 + limit);
-  if (end < lines.length) body += `\n… [${lines.length - end} more lines, read with offset=${end + 1}]`;
-  return { text: body, show: gray(from > 1 || end < lines.length ? `lines ${from}-${end} of ${lines.length}` : `${lines.length} lines`) };
-}
-
-// ─── tools/index.ts ────────────────────────────────────────────────────────
-// Tool schemas sent to the model, dispatch, and parallel execution.
-
-const TOOLS = [
-  {
-    name: 'write',
-    description: 'Create or overwrite a file with its complete content. Parent folders are created automatically.',
-    schema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] },
-  },
-  {
-    name: 'edit',
-    description: 'Replace exact text in an existing file. Each `old` must occur exactly once. Put all changes to one file into a single call.',
-    schema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string' },
-        edits: { type: 'array', items: { type: 'object', properties: { old: { type: 'string' }, new: { type: 'string' } }, required: ['old', 'new'] } },
-      },
-      required: ['path', 'edits'],
-    },
-  },
-  {
-    name: 'read',
-    description: 'Read a text file (optionally a line range) or list a directory.',
-    schema: {
-      type: 'object',
-      properties: { path: { type: 'string' }, offset: { type: 'integer', description: 'first line, 1-based' }, limit: { type: 'integer' } },
-      required: ['path'],
-    },
-  },
-  {
-    name: 'shell',
-    description: `Run a ${SHELL} command in the working directory (non-interactive, no stdin). Returns exit code and output tail.`,
-    schema: { type: 'object', properties: { command: { type: 'string' }, timeout: { type: 'integer', description: 'seconds, default 120' } }, required: ['command'] },
-  },
-];
-
-const VERB: Record<string, string> = { write: 'Write', edit: 'Update', read: 'Read' };
-
-function describe(c: Call) {
-  const a = c.args || {};
-  if (c.name === 'shell') return `${accent2('$')} ${shellLabel(String(a.command ?? ''))}`;
-  return `${bold(VERB[c.name] || c.name)} ${a.path ?? ''}`;
-}
-
-async function runTool(c: Call, sig: AbortSignal, card: Card): Promise<Result> {
-  if (sig.aborted) return { text: 'not run: interrupted by user', err: true, show: yellow('skipped') };
-  if (c.bad) return { text: c.bad, err: true, show: c.bad };
-  try {
-    switch (c.name) {
-      case 'write': return toolWrite(c.args);
-      case 'edit': return toolEdit(c.args);
-      case 'read': return toolRead(c.args);
-      case 'shell':
-        if (cfg.safe && !(await confirm(`Run this command?\n\n${String(c.args.command)}`, 'Run it', 'Skip')))
-          return { text: 'user declined to run this command', err: true, show: yellow('declined') };
-        return await toolShell(c.args, sig, card);
-      default: throw new Error(`unknown tool ${c.name}`);
-    }
-  } catch (e: any) {
-    return { text: `error: ${e.message}`, err: true, show: red(e.message) };
-  }
-}
-
-// Calls touching the same file run in order; everything else runs in parallel.
-async function runTools(calls: Call[], sig: AbortSignal): Promise<Result[]> {
-  const results: Result[] = new Array(calls.length);
-  const groups = new Map<string, number[]>();
-  calls.forEach((c, i) => {
-    const k = c.name === 'shell' ? `$${i}` : (() => { try { return safePath(c.args?.path); } catch { return `?${i}`; } })();
-    groups.set(k, [...(groups.get(k) || []), i]);
-  });
-  await Promise.all([...groups.values()].map(async (idx) => {
-    for (const i of idx) {
-      const card = newCard(describe(calls[i]));
-      results[i] = await runTool(calls[i], sig, card);
-      finishCard(card, results[i]);
-    }
-  }));
-  return results;
+async function runShell(cmd: string) {
+  const ctrl = new AbortController();
+  agent.ctrl = ctrl; agent.t0 = Date.now();
+  const card = newCard(cmd);
+  let r;
+  try { r = await toolShell({ command: cmd }, ctrl.signal, card); }
+  catch (e: any) { r = { text: `error: ${e.message}`, err: true, show: red(e.message) }; }
+  finishCard(card, r);
+  agent.ctrl = null;
+  conv.history.push({ role: 'user', text: `[I ran \`${cmd}\` myself]\n${r.text}` });
 }
 
 // ─── agent/stream.ts ───────────────────────────────────────────────────────
@@ -2121,7 +2294,8 @@ async function callAnthropic(p: Prov, sig: AbortSignal, acc: Turn) {
     switch (ev.type) {
       case 'message_start': {
         const u = ev.message?.usage || {};
-        usage.in += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+        usage.last = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+        usage.in += usage.last;
         usage.cache += u.cache_read_input_tokens || 0; usage.out += u.output_tokens || 0;
         break;
       }
@@ -2183,7 +2357,7 @@ async function callOpenAI(p: Prov, sig: AbortSignal, acc: Turn) {
     if (ch.error) throw new Error(ch.error.message || JSON.stringify(ch.error));
     if (ch.usage) {
       const c = ch.usage.prompt_tokens_details?.cached_tokens || ch.usage.prompt_cache_hit_tokens || 0;
-      usage.in += ch.usage.prompt_tokens || 0; usage.out += ch.usage.completion_tokens || 0; usage.cache += c;
+      usage.last = ch.usage.prompt_tokens || usage.last; usage.in += ch.usage.prompt_tokens || 0; usage.out += ch.usage.completion_tokens || 0; usage.cache += c;
     }
     const choice = ch.choices?.[0];
     if (!choice) continue;
@@ -2222,16 +2396,26 @@ async function runTurn(text: string) {
     for (;;) {
       steps++;
       spin.start(steps === 1 ? verb : 'Working');
-      const acc: Turn = { text: '', calls: [], stop: '' };
-      agent.firstAt = 0;
-      try {
-        const p = cur();
-        await (p.type === 'anthropic' ? callAnthropic(p, sig, acc) : callOpenAI(p, sig, acc));
-        if (agent.firstAt) genMs += Date.now() - agent.firstAt;
-      } catch (e) {
-        endStream();
-        if (acc.text) conv.history.push({ role: 'assistant', text: acc.text, calls: [] });
-        throw e;
+      const cut = keepSmall();
+      if (cut) line(gray(`context trimmed: old tool output removed (${kt(Math.round(cut / 4))} tokens)`), { ind: 2, mark: gray('✂ ') });
+      let acc: Turn = { text: '', calls: [], stop: '' };
+      for (let retried = false; ;) {
+        acc = { text: '', calls: [], stop: '' };
+        agent.firstAt = 0;
+        try {
+          const p = cur();
+          await (p.type === 'anthropic' ? callAnthropic(p, sig, acc) : callOpenAI(p, sig, acc));
+          if (agent.firstAt) genMs += Date.now() - agent.firstAt;
+          break;
+        } catch (e: any) {
+          endStream();
+          // the prompt no longer fits: drop old tool output and try once more
+          if (!retried && !sig.aborted && !acc.text && !acc.calls.length && tooLong(String(e.message)) && prune(2) > 0) {
+            retried = true; line(gray('context too long — old tool output removed, retrying'), { ind: 2, mark: gray('✂ ') }); continue;
+          }
+          if (acc.text) conv.history.push({ role: 'assistant', text: acc.text, calls: [] });
+          throw e;
+        }
       }
       endStream();
       conv.history.push({ role: 'assistant', text: acc.text, calls: acc.calls, blocks: acc.blocks, prov: cfg.provider });
@@ -2271,18 +2455,24 @@ if (!process.stdin.isTTY && (opt.print || rest.length)) stdinText = await new Pr
   let d = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', (c) => (d += c)); process.stdin.on('end', () => res(d));
 });
 const firstPrompt = [rest.join(' '), stdinText.trim()].filter(Boolean).join('\n\n');
+const last = opt.cont ? listSessions()[0] : undefined;
+if (!last) newSession();
 
 if (opt.print || !process.stdin.isTTY || !process.stdout.isTTY) {
   if (!firstPrompt) { console.error('fa: no prompt'); process.exit(1); }
   if (!cfg.model) { console.error('fa: no model — pass -m provider/model or run fa once to set it up'); process.exit(1); }
   process.on('SIGINT', () => (agent.ctrl ? agent.ctrl.abort() : process.exit(130)));
+  if (last) loadSession(last.id, true);
   await runTurn(firstPrompt);
+  saveSession();
   process.exit(0);
 }
 
 startTui();
 banner();
 checkUpdates();
+if (last) loadSession(last.id);
+else if (opt.cont) line(gray('no earlier conversation in this directory'), { ind: 2 });
 if (cfg.sync) pull().then((got) => { if (got) line(gray(`settings synced from ${cfg.sync!.user}`), { mark: green('↓ '), ind: 2 }); }, (e) => line(yellow(`sync: ${e.message}`), { ind: 2 }));
 if (!cfg.setupDone) {
   const w = await welcome();
@@ -2297,10 +2487,13 @@ for (;;) {
   if (input === null) break;
   if (hist[hist.length - 1] !== input) hist.push(input);
   const isCmd = /^\/\S/.test(input.trim()) && !input.includes('\n');
+  const isBang = /^!\S/.test(input.trim());
   gap();
-  line(isCmd ? gray(input) : input.trim(), { mark: accent('› '), ind: 2, kind: 'user' });
+  line(isCmd ? gray(input) : isBang ? input.trim().slice(1) : input.trim(), { mark: accent(isBang ? '$ ' : '› '), ind: 2, kind: 'user' });
   if (isCmd) { if (!(await command(input))) break; continue; }
-  await runTurn(input);
+  if (isBang) await runShell(input.trim().slice(1));
+  else await runTurn(input);
+  saveSession();
 }
 leaveTui();
 await flushSync();

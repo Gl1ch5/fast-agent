@@ -49,7 +49,8 @@ export async function callAnthropic(p: Prov, sig: AbortSignal, acc: Turn) {
     switch (ev.type) {
       case 'message_start': {
         const u = ev.message?.usage || {};
-        usage.in += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+        usage.last = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+        usage.in += usage.last;
         usage.cache += u.cache_read_input_tokens || 0; usage.out += u.output_tokens || 0;
         break;
       }

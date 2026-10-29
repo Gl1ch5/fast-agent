@@ -119,7 +119,7 @@ export function suggestions(): [string, string][] {
 export function inputView(tw: number): { rows: string[]; cur: [number, number] } {
   const busy = !!agent.ctrl;
   const prompt = busy ? gray('› ') : accent('› ');
-  if (!editor.chars.length) return { rows: [prompt + gray(busy ? 'type to queue a message…' : 'Ask anything · / for commands')], cur: [0, 2] };
+  if (!editor.chars.length) return { rows: [prompt + gray(busy ? 'type to queue a message…' : 'Ask anything · / for commands · ! for shell')], cur: [0, 2] };
   const cw = Math.max(4, tw - 2);
   const segs: { s: string[]; start: number }[] = [];
   let seg = { s: [] as string[], start: 0 }, n = 0;

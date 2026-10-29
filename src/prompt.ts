@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { IS_WIN, ROOT } from './env.ts';
+import { CFG_DIR } from './config.ts';
 import { SHELL } from './tools/shell.ts';
 
 export function systemPrompt() {
@@ -11,6 +12,7 @@ export function systemPrompt() {
     listing = ents.slice(0, 80).map((e) => e.name + (e.isDirectory() ? '/' : '')).join('  ') + (ents.length > 80 ? `  … +${ents.length - 80}` : '');
   } catch {}
   const ctx: string[] = [];
+  try { const t = fs.readFileSync(path.join(CFG_DIR, 'AGENTS.md'), 'utf8').trim().slice(0, 16_000); if (t) ctx.push(`<user_instructions path="~/.fa/AGENTS.md">\n${t}\n</user_instructions>`); } catch {}
   for (const f of ['AGENTS.md', 'CLAUDE.md']) {
     try { const t = fs.readFileSync(path.join(ROOT, f), 'utf8').trim().slice(0, 16_000); if (t) ctx.push(`<project_instructions path="${f}">\n${t}\n</project_instructions>`); } catch {}
   }
@@ -26,7 +28,7 @@ export function systemPrompt() {
 The user's words are the spec. Their instructions, then the project instructions below, override everything else here.
 - Do what the user asked — and only that. Scope is about WHAT you touch, never about how well you do it.
 - Use exactly the names, paths, languages, libraries and approach the user gave; if they said how to do it, do it that way.
-- Do not test, build, lint, type-check, run or "verify" anything unless the user or the project instructions ask for it.
+- Do not test, build, lint, type-check, run or "verify" anything unless the user or the project instructions ask for it. One exception: after fixing a bug, if the project has an obvious quick check (an existing test or build command), run it once.
 - Do not create files nobody asked for: no README, tests, configs, examples, docs, scripts, backups.
 - Do not touch unrelated code, files or formatting; no refactors, renames or new dependencies nobody asked for.
 - A question gets an answer, not file changes. A request to explain or review does not change files.
@@ -53,6 +55,6 @@ Inside that scope, deliver the best result you can — complete, polished, produ
 - Be concise. Show file paths clearly when you mention files.
 - When done: one short sentence on what changed. No feature lists, no headings, no next steps, no suggestions.
 - Reply in the user's language.
-${ctx.length ? `\n# Project instructions\n${ctx.join('\n\n')}\n` : ''}
+${ctx.length ? `\n# User and project instructions\n${ctx.join('\n\n')}\n` : ''}
 Working directory: ${listing || '(empty)'}`;
 }

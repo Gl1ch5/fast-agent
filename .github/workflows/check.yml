@@ -12,3 +12,5 @@ jobs:
         run: node build.ts --check
       - name: fa.ts starts
         run: echo "" | node fa.ts -p || test $? -eq 1
+      - name: smoke test
+        run: node tests/smoke.ts

@@ -9,6 +9,7 @@ import { callOpenAI } from '../api/openai.ts';
 import { kt } from '../util.ts';
 import { conv, usage, agent, type Turn } from './state.ts';
 import { endStream } from './stream.ts';
+import { keepSmall, prune, tooLong } from './context.ts';
 
 const VERBS = ['Thinking', 'Pondering', 'Working', 'Crafting', 'Cooking', 'Brewing', 'Computing', 'Conjuring'];
 
@@ -25,16 +26,26 @@ export async function runTurn(text: string) {
     for (;;) {
       steps++;
       spin.start(steps === 1 ? verb : 'Working');
-      const acc: Turn = { text: '', calls: [], stop: '' };
-      agent.firstAt = 0;
-      try {
-        const p = cur();
-        await (p.type === 'anthropic' ? callAnthropic(p, sig, acc) : callOpenAI(p, sig, acc));
-        if (agent.firstAt) genMs += Date.now() - agent.firstAt;
-      } catch (e) {
-        endStream();
-        if (acc.text) conv.history.push({ role: 'assistant', text: acc.text, calls: [] });
-        throw e;
+      const cut = keepSmall();
+      if (cut) line(gray(`context trimmed: old tool output removed (${kt(Math.round(cut / 4))} tokens)`), { ind: 2, mark: gray('✂ ') });
+      let acc: Turn = { text: '', calls: [], stop: '' };
+      for (let retried = false; ;) {
+        acc = { text: '', calls: [], stop: '' };
+        agent.firstAt = 0;
+        try {
+          const p = cur();
+          await (p.type === 'anthropic' ? callAnthropic(p, sig, acc) : callOpenAI(p, sig, acc));
+          if (agent.firstAt) genMs += Date.now() - agent.firstAt;
+          break;
+        } catch (e: any) {
+          endStream();
+          // the prompt no longer fits: drop old tool output and try once more
+          if (!retried && !sig.aborted && !acc.text && !acc.calls.length && tooLong(String(e.message)) && prune(2) > 0) {
+            retried = true; line(gray('context too long — old tool output removed, retrying'), { ind: 2, mark: gray('✂ ') }); continue;
+          }
+          if (acc.text) conv.history.push({ role: 'assistant', text: acc.text, calls: [] });
+          throw e;
+        }
       }
       endStream();
       conv.history.push({ role: 'assistant', text: acc.text, calls: acc.calls, blocks: acc.blocks, prov: cfg.provider });

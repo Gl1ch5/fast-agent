@@ -9,7 +9,7 @@ export type PType = 'openai' | 'anthropic';
 export interface Prov { type: PType; url: string; key?: string; env?: string; headers?: Record<string, string> }
 export interface Cfg {
   provider: string; model: string; effort: string; fast: boolean; safe: boolean;
-  maxTokens?: number; providers: Record<string, Partial<Prov>>;
+  maxTokens?: number; compactAt?: number; providers: Record<string, Partial<Prov>>;
   models: string[];        // "provider/model" labels picked during setup — what /model offers
   setupDone: boolean;
   latest?: string; lastCheck?: number;
@@ -39,7 +39,7 @@ export const EFFORTS: [string, string][] = [
   ['max', 'maximum reasoning, slowest'],
 ];
 
-const CFG_DIR = process.env.FA_HOME || path.join(os.homedir(), '.fa');
+export const CFG_DIR = process.env.FA_HOME || path.join(os.homedir(), '.fa');
 const CFG_FILE = path.join(CFG_DIR, 'config.json');
 export const cfg: Cfg = { provider: '', model: '', effort: 'auto', fast: false, safe: false, providers: {}, models: [], setupDone: false };
 try { Object.assign(cfg, JSON.parse(fs.readFileSync(CFG_FILE, 'utf8'))); } catch {}
