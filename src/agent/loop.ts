@@ -55,5 +55,5 @@ export async function runTurn(text: string) {
   const s = ((Date.now() - agent.t0) / 1000).toFixed(1);
   const cache = usage.cache - u0.cache;
   gap();
-  line(gray(`✻ ${s}s · ↑${kt(usage.in - u0.in)}${cache ? ` (${kt(cache)} cached)` : ''} ↓${kt(usage.out - u0.out)} · ${steps} step${steps > 1 ? 's' : ''}`), { ind: 2, kind: 'meta' });
+  line(gray(`${s}s · ↑${kt(usage.in - u0.in)}${cache ? ` (${kt(cache)} cached)` : ''} ↓${kt(usage.out - u0.out)} · ${steps} step${steps > 1 ? 's' : ''}`), { ind: 2, mark: gray('✻ '), kind: 'meta' });
 }

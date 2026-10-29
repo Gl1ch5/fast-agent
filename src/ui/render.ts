@@ -30,6 +30,7 @@ export function wrapLog(W: number): string[] {
   let fence = false;
   for (const r of log) {
     const inFence = !!r.md && fence;
+    if (r.dyn) { if (!r.wr || r.ww !== W) { r.wr = r.dyn(W); r.ww = W; } for (const l of r.wr) all.push(l); continue; }
     if (!r.wr || r.ww !== W || r.wf !== inFence) {
       const ind = r.ind || 0;
       const body = r.md ? mdLine(r.s, inFence) : r.s;
@@ -45,23 +46,27 @@ export function wrapLog(W: number): string[] {
 
 const STAR = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
 
-function liveRows(W: number): string[] {
-  const busy = !!agent.ctrl;
-  if (!busy && !spin.on && !cards.length) return [];
-  const rows: string[] = [''];
+// running tool cards, shown right after the transcript
+function cardBlock(W: number): string[] {
+  if (!cards.length) return [];
+  const rows = log.length && log[log.length - 1].s !== '' && log[log.length - 1].kind !== 'tool' ? [''] : [];
   for (const c of cards) rows.push(...cardRows(c, W));
-  if (busy || spin.on) {
-    let st = `${accent(STAR[ui.tick % STAR.length])} ${shimmer((spin.text || 'Working') + '…', ui.tick)}`;
-    if (busy) {
-      const secs = Math.floor((Date.now() - agent.t0) / 1000);
-      st += gray(` (${secs}s · ↓ ${kt(Math.round(agent.chars / 4))} tokens · esc to interrupt)`);
-    }
-    rows.push(fit(st, W));
-    if (agent.thinking) {
-      const last = agent.thinkBuf.trim().split('\n').pop() || '';
-      if (last) rows.push(fit(gray(italic('  ' + last)), W));
-    }
+  return rows;
+}
+
+// status above the input: always two rows while working, so nothing above jumps
+function statusRows(W: number): string[] {
+  const busy = !!agent.ctrl;
+  if (!busy && !spin.on) return [''];
+  const rows: string[] = [];
+  let st = `${accent(STAR[ui.tick % STAR.length])} ${shimmer((spin.text || 'Working') + '…', ui.tick)}`;
+  if (busy) {
+    const secs = Math.floor((Date.now() - agent.t0) / 1000);
+    st += gray(` (${secs}s · ↓ ${kt(Math.round(agent.chars / 4))} tokens · esc to interrupt)`);
   }
+  rows.push(fit(st, W));
+  const last = agent.thinking ? agent.thinkBuf.trim().split('\n').pop() || '' : '';
+  rows.push(last ? fit(gray(italic('  ' + last)), W) : '');
   return rows;
 }
 
@@ -82,19 +87,21 @@ function footer(W: number): string {
   else left = gray('/ commands · ↑↓ history · wheel/PgUp scroll');
   const upd = cfg.latest && cmpVer(cfg.latest, VERSION) > 0 ? yellow(`↑ ${cfg.latest} · /update`) + gray(' · ') : '';
   const right = upd + gray(`${modelLabel()} · ${cfg.effort}${cfg.fast ? ' · fast' : ''}${cfg.safe ? ' · safe' : ''}`);
-  const sp = W - 1 - vw(left) - vw(right);
-  return sp >= 2 ? ' ' + left + ' '.repeat(sp) + right : ' ' + fit(left, W - 1);
+  const sp = W - vw(left) - vw(right);
+  return sp >= 2 ? left + ' '.repeat(sp) + right : fit(left, W);
 }
 
 let prev: string[] = [];
+let prevCur = '';
 let lastTotal = 0;
+const PAD = 2;   // same margin on the left and on the right
 
-export function resetFrame() { prev = []; w('\x1b[2J'); }
+export function resetFrame() { prev = []; prevCur = ''; w('\x1b[2J'); }
 
 export function render() {
   if (!ui.tui) return;
   const H = Math.max(8, process.stdout.rows || 24);
-  const W = Math.max(24, (process.stdout.columns || 80) - 1);   // never touch the last column
+  const W = Math.max(24, (process.stdout.columns || 80) - PAD * 2);
   const bottom: string[] = [];
   let cur: [number, number] | null = null;
   const m = M.modal;
@@ -106,7 +113,7 @@ export function render() {
     bottom.push(...boxed(body, W, m.title, borderHi));
     if (r.cur) cur = [r.cur[0] + 1, r.cur[1] + 2];
   } else {
-    bottom.push(...liveRows(W).slice(-Math.max(3, Math.floor(H / 2))));
+    bottom.push(...statusRows(W));
     for (const q of queue) bottom.push(fit(gray(`  ⏎ ${q.replace(/\n/g, ' ')}`), W));
     const iv = inputView(W - 4);
     cur = [bottom.length + 1 + iv.cur[0], 2 + iv.cur[1]];
@@ -115,7 +122,7 @@ export function render() {
     if (sug.length) bottom.push(...sugRows(sug, W));
   }
   const vh = Math.max(0, H - 1 - bottom.length);
-  const all = m?.full ? [] : wrapLog(W);
+  const all = m?.full ? [] : [...wrapLog(W), ...cardBlock(W)];
   if (ui.scroll > 0 && all.length > lastTotal) ui.scroll += all.length - lastTotal;
   lastTotal = all.length;
   ui.scroll = Math.max(0, Math.min(ui.scroll, all.length - vh));
@@ -126,9 +133,11 @@ export function render() {
   while (frame.length < H - 1 - bottom.length) frame.push('');
   const top = frame.length;
   frame.push(...bottom, footer(W));
-  let o = '\x1b[?2026h\x1b[?25l';
-  frame.slice(0, H).forEach((r, i) => { if (prev[i] !== r) o += `\x1b[${i + 1};1H\x1b[2K${r}\x1b[0m`; });
-  prev = frame;
-  if (cur) o += `\x1b[${top + cur[0] + 1};${cur[1] + 1}H\x1b[?25h`;
-  w(o + '\x1b[?2026l');
+  // only rewrite rows that changed; an unchanged frame writes nothing (no cursor flicker)
+  let rows = '';
+  frame.slice(0, H).forEach((r, i) => { if (prev[i] !== r) rows += `\x1b[${i + 1};1H\x1b[2K${' '.repeat(PAD)}${r}\x1b[0m`; });
+  const curPos = cur ? `\x1b[${top + cur[0] + 1};${cur[1] + 1 + PAD}H` : '';
+  if (!rows && curPos === prevCur) return;
+  prev = frame; prevCur = curPos;
+  w('\x1b[?2026h' + (rows ? '\x1b[?25l' + rows : '') + (curPos ? curPos + '\x1b[?25h' : '\x1b[?25l') + '\x1b[?2026l');
 }

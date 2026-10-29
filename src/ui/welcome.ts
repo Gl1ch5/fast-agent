@@ -41,14 +41,13 @@ export function welcome(): Promise<boolean> {
 }
 
 export function banner() {
-  const W = Math.min(64, Math.max(24, (process.stdout.columns || 80) - 1));
   const rows = [
     `${accent('✻')} ${bold('Welcome to fa')} ${gray('v' + VERSION)}`,
     '',
     gray(`cwd  ${tildify(ROOT)}`),
     gray('/ for commands · /setup to configure · /model to switch'),
   ];
-  for (const r of boxed(rows, W, '', border)) log.push({ s: r, clip: true });
+  log.push({ s: 'banner', dyn: (W) => boxed(rows, W, '', border) });
   log.push({ s: '' });
   req();
 }

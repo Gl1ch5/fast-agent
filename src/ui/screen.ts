@@ -9,6 +9,7 @@ import { queue } from './input.ts';
 // One logical transcript line. Wrapped to the screen width at render time (cached).
 export interface Row {
   s: string; md?: boolean; ind?: number; mark?: string; clip?: boolean; kind?: string;
+  dyn?: (w: number) => string[];   // drawn at the current width (e.g. the banner)
   wr?: string[]; ww?: number; wf?: boolean;
 }
 
